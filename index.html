@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0b0d10">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file: blob: data:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: blob: data:; media-src 'self' file: blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none';">
+  <title>Astria</title>
+  <link rel="icon" type="image/png" href="assets/icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="panel-collapsed">
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="topbar-ambient" aria-hidden="true"><canvas id="topbarAmbientCanvas" width="64" height="36"></canvas></div>
+      <div class="brand" aria-label="Astria">
+        <span>ASTRIA</span>
+        <small class="runtime-badge" id="runtimeLabel">V0.8.7</small>
+      </div>
+      <div class="top-center">
+        <details class="review-menu" id="reviewMenu">
+        <summary title="画面检查工具" aria-label="画面检查工具"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1.5"/><rect x="14" y="4" width="6" height="6" rx="1.5"/><rect x="4" y="14" width="6" height="6" rx="1.5"/><rect x="14" y="14" width="6" height="6" rx="1.5"/></svg></summary>
+        <div class="review-tool-cluster" role="group" aria-label="画面检查工具">
+        <div class="luma-control" id="lumaControl">
+          <button class="luma-button" id="lumaBtn" title="明暗检查：去除颜色干扰 (G)" aria-label="明暗检查"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M5 19l1.5-1.5M17.5 6.5 19 5"/></svg><span class="review-tool-label">亮度</span></button>
+          <div class="luma-contrast" title="LUMA 对比度"><span>C</span><input id="lumaContrast" type="range" min="50" max="200" value="100" step="5" aria-label="LUMA 对比度"><output id="lumaContrastValue">100%</output><button id="lumaResetBtn" title="恢复 100% 对比度" aria-label="恢复默认对比度">↺</button></div>
+        </div>
+        <button class="pixel-inspector-button" id="pixelInspectorBtn" title="拾色（默认关闭）" aria-label="拾色" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 5 5-3 3-5-5zM14 7 4 17v3h3L17 10M11 5l8 8"/></svg><span class="review-tool-label">拾色</span></button>
+        <details class="top-tool-popover color-view-tool" id="colorViewTool">
+          <summary class="top-tool-button" title="色彩空间与查看预设" aria-label="色彩空间与查看预设">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3v18M12 3a9 9 0 0 1 0 18"/><path d="m15 6 3 3M14 10l6 6M14 15l3 3"/></svg><span>色彩</span><i></i>
+          </summary>
+          <div class="top-tool-panel color-view-panel">
+            <header><div><b>色彩查看</b></div><span>SDR</span></header>
+            <label class="top-tool-select"><span>查看预设</span><select id="colorPresetSelect"><option value="original">原始／标准视频</option><option value="ue5-filmic">UE5 Filmic SDR</option><option value="unity-neutral">Unity Linear Neutral</option><option value="unity-aces">Unity Linear ACES</option><option value="acescg">ACEScg → ACES SDR</option><option value="aces2065">ACES2065-1 → ACES SDR</option></select></label>
+            <div class="color-preset-warning" id="colorPresetWarning">线性输入预设包含 Tone Mapping。普通 MP4 若已完成调色，请保持“原始”。</div>
+            <p class="top-tool-note">仅改变观看效果，不写入截图、缩略图或导出。</p>
+          </div>
+        </details>
+        <details class="top-tool-popover guide-view-tool" id="guideViewTool">
+          <summary class="top-tool-button" title="构图与安全框 (H)" aria-label="构图与安全框">
+            <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9.33 4v16M14.67 4v16M4 9.33h16M4 14.67h16"/></svg><span>构图</span><i></i>
+          </summary>
+          <div class="top-tool-panel guide-view-panel">
+            <header><div><b>构图与安全框</b></div><kbd>H</kbd></header>
+            <div class="guide-switch-grid">
+              <label><input id="guideThirds" type="checkbox">三分法</label><label><input id="guideGolden" type="checkbox">黄金分割</label>
+              <label><input id="guideSpiral" type="checkbox">黄金螺旋</label><label><input id="guideCenter" type="checkbox">中心 / 对称</label>
+              <label><input id="guideDiagonal" type="checkbox">对角线</label><label><input id="guideTriangle" type="checkbox">三角构图</label>
+              <label><input id="guideSymmetry" type="checkbox">动态对称</label>
+              <label><input id="guideActionSafe" type="checkbox">Action Safe 90%</label><label><input id="guideTitleSafe" type="checkbox">Title Safe 80%</label>
+            </div>
+            <label class="top-tool-select"><span>螺旋方向</span><select id="guideSpiralRotation"><option value="0">0°</option><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select></label>
+            <label class="top-tool-select"><span>宽高比遮罩</span><select id="guideAspect"><option value="off">关闭</option><option value="16:9">16:9</option><option value="1.85">1.85:1</option><option value="2.39">2.39:1</option><option value="4:3">4:3</option><option value="1:1">1:1</option><option value="9:16">9:16</option></select></label>
+            <label class="top-tool-range"><span>辅助线透明度</span><input id="guideOpacity" type="range" min="10" max="100" value="55" step="5"></label>
+            <label class="top-tool-range"><span>遮罩强度</span><input id="guideMaskStrength" type="range" min="10" max="90" value="55" step="5"></label>
+            <p class="top-tool-note">纯净模式继续显示，且永远不会进入导出。</p>
+          </div>
+        </details>
+        </div>
+        </details>
+        <div id="activeReviewTools" aria-label="已开启的画面工具"></div>
+        <div class="project-title">
+          <span class="status-dot"></span>
+          <span id="projectName">未载入素材</span>
+        </div>
+        <div class="media-info-top" id="mediaInfoTop">
+          <span id="hudResolution">— × —</span>
+          <span id="hudFps">24 FPS</span>
+          <span id="statusText">就绪</span>
+          <span class="cache-status" id="cacheStatus">CACHE · 0F</span>
+        </div>
+      </div>
+      <div class="top-actions">
+        <div class="top-action-cluster" aria-label="主要操作">
+          <button class="icon-button" id="openVideoBtn" title="打开视频 (Ctrl+O)" aria-label="打开视频">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10V6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v1M3 10h18l-2 9H5z"/></svg>
+          </button>
+          <details class="top-more" id="topMore">
+            <summary class="icon-button" title="更多操作" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h14"/></svg></summary>
+            <div class="top-more-menu">
+          <button class="top-menu-action" id="saveBtn" title="保存工作区 (Ctrl+S)" aria-label="保存工作区">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12l4 4v12a2 2 0 0 1-2 2ZM7 3v6h10V3M7 21v-8h10v8"/></svg>
+            <span>保存工作区</span><kbd>Ctrl+S</kbd>
+          </button>
+          <button class="top-menu-action" id="exportBtn" title="导出工作区" aria-label="导出工作区" aria-expanded="false" aria-controls="exportMenu">
+            <svg viewBox="0 0 24 24"><path d="M12 15V3.5M8.2 7.3 12 3.5l3.8 3.8"/><path d="M6 10.5H5.5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2H18"/></svg>
+            <span>导出</span><svg class="export-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>
+          </button>
+          <div class="export-menu" id="exportMenu" aria-hidden="true" inert>
+            <button id="exportWorkspaceMenuBtn"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6M8 13h8M8 17h5"/></svg></span><b>工作区文件</b><small>书签、批注与项目设置</small></button>
+            <button id="contactSheetBtn"><span><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 12h18M12 3v18"/></svg></span><b>导出联系表</b><small>将关键帧整理为 PNG 图片</small></button>
+          </div>
+          <button class="top-menu-action" id="helpBtn" title="快捷键" aria-label="快捷键帮助"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="3"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M7 15h10"/></svg><span>快捷键</span></button>
+            </div>
+          </details>
+        </div>
+        <div class="window-controls" aria-label="窗口控制">
+          <button class="window-control-button" id="windowMinimizeBtn" title="最小化" aria-label="最小化">
+            <svg viewBox="0 0 24 24"><path d="M6 12h12"/></svg>
+          </button>
+          <button class="window-control-button" id="windowMaximizeBtn" title="最大化或还原" aria-label="最大化或还原">
+            <svg class="maximize-icon" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx=".5"/></svg>
+            <svg class="restore-icon" viewBox="0 0 24 24"><path d="M8 9V6.5h9.5V16H15M6.5 8.5H15V17H6.5z"/></svg>
+          </button>
+          <button class="window-control-button window-close-button" id="windowCloseBtn" title="关闭" aria-label="关闭">
+            <svg viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg>
+          </button>
+        </div>
+      </div>
+      <input id="videoInput" type="file" accept="video/*" hidden>
+    </header>
+
+    <main class="workspace">
+      <canvas id="ambientCanvas" width="64" height="36" aria-hidden="true"></canvas>
+      <section class="viewer-column">
+        <div class="clean-drag-region" aria-hidden="true"></div>
+        <div class="viewer-stage" id="viewerStage">
+          <div class="clean-window-controls" aria-label="窗口控制">
+            <button class="window-control-button" id="cleanWindowMinimizeBtn" title="最小化" aria-label="最小化">
+              <svg viewBox="0 0 24 24"><path d="M6 12h12"/></svg>
+            </button>
+            <button class="window-control-button" id="cleanWindowMaximizeBtn" title="最大化或还原" aria-label="最大化或还原">
+              <svg class="maximize-icon" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx=".5"/></svg>
+              <svg class="restore-icon" viewBox="0 0 24 24"><path d="M8 9V6.5h9.5V16H15M6.5 8.5H15V17H6.5z"/></svg>
+            </button>
+            <button class="window-control-button window-close-button" id="cleanWindowCloseBtn" title="关闭" aria-label="关闭">
+              <svg viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg>
+            </button>
+          </div>
+          <div class="media-surface" id="mediaSurface">
+            <video id="video" preload="metadata" playsinline></video>
+            <canvas id="frameCacheCanvas" aria-hidden="true"></canvas>
+            <canvas id="colorViewCanvas" aria-hidden="true"></canvas>
+            <svg class="composition-guides" id="compositionGuides" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">
+              <path class="aspect-mask" id="aspectMaskPath" fill-rule="evenodd"></path>
+              <g class="guide-lines thirds-guides" id="thirdsGuides"><path d="M333.333 0V1000M666.667 0V1000M0 333.333H1000M0 666.667H1000"/></g>
+              <g class="guide-lines golden-guides" id="goldenGuides"><path d="M381.966 0V1000M618.034 0V1000M0 381.966H1000M0 618.034H1000"/></g>
+              <g class="guide-lines spiral-guides" id="spiralGuides"><path d="M985 500C985 768 768 985 500 985C235 985 20 770 20 505C20 295 190 125 400 125C570 125 708 263 708 433C708 570 597 681 460 681C350 681 261 592 261 482C261 393 333 321 422 321C494 321 552 379 552 451C552 509 505 556 447 556C400 556 362 518 362 471C362 433 393 402 431 402C462 402 487 427 487 458"/></g>
+              <g class="guide-lines center-guides" id="centerGuides"><path d="M500 0V1000M0 500H1000"/></g>
+              <g class="guide-lines diagonal-guides" id="diagonalGuides"><path d="M0 0L1000 1000M1000 0L0 1000"/></g>
+              <g class="guide-lines triangle-guides" id="triangleGuides"><path d="M0 1000L1000 0M0 0L381.966 618.034M1000 1000L618.034 381.966"/></g>
+              <g class="guide-lines symmetry-guides" id="symmetryGuides"><path d="M0 0L1000 1000M1000 0L0 1000M0 0L618.034 1000M1000 0L381.966 1000M0 1000L618.034 0M1000 1000L381.966 0"/></g>
+              <g class="guide-lines action-safe-guides" id="actionSafeGuides"><rect x="50" y="50" width="900" height="900"/></g>
+              <g class="guide-lines title-safe-guides" id="titleSafeGuides"><rect x="100" y="100" width="800" height="800"/></g>
+            </svg>
+            <canvas id="annotationCanvas"></canvas>
+          </div>
+          <div class="viewer-empty" id="viewerEmpty">
+            <div class="empty-glyph">
+              <svg viewBox="0 0 40 40"><path d="M10 8h20v24H10zM14 13h12M14 18h12M14 23h7"/></svg>
+            </div>
+            <h1>打开一个视频开始分析</h1>
+            <p>将视频拖到此处，或从本地选择文件</p>
+            <button class="primary-button" id="emptyOpenBtn">选择视频 <span>Ctrl O</span></button>
+            <small>支持浏览器可播放的 MP4、WebM、MOV</small>
+            <div class="recent-media" id="recentMedia" hidden>
+              <div class="recent-media-head"><b>最近打开</b><button id="clearRecentBtn">清除</button></div>
+              <div class="recent-media-list" id="recentMediaList"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="bottom-dock">
+        <div class="transport">
+          <div class="clean-volume"><button type="button" id="cleanMuteBtn" aria-label="静音" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4zM16 9c1.5 1.5 1.5 4.5 0 6M19 6c3.2 3.2 3.2 8.8 0 12"/></svg></button><input id="cleanVolumeSlider" type="range" min="0" max="100" value="100" aria-label="音量"></div>
+          <div class="transport-left">
+            <button class="transport-btn" id="jumpStartBtn" title="第一帧"><svg viewBox="0 0 24 24"><path d="M6 5v14M18 6l-9 6 9 6z"/></svg></button>
+            <button class="transport-btn" id="stepBack5Btn" title="后退 5 帧 (Shift+←)"><span>−5</span></button>
+            <button class="transport-btn" id="stepBackBtn" title="后退 1 帧 (←)" aria-label="上一帧"><svg class="transport-solid" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="2.3" height="14" rx="1.15"/><path d="M17.7 5.5c.8-.5 1.8.1 1.8 1v11c0 .9-1 1.5-1.8 1L9.4 13c-.8-.5-.8-1.5 0-2z"/></svg></button>
+            <button class="play-btn" id="playBtn" title="播放/暂停 (Space)">
+              <svg class="play-icon transport-solid" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.4 4.7C7.4 4.1 6.5 4.8 6.5 6v12c0 1.2.9 1.9 1.9 1.3l10-6c1-.6 1-2 0-2.6z"/></svg>
+              <svg class="pause-icon transport-solid" viewBox="0 0 24 24" aria-hidden="true"><rect x="5.5" y="4.5" width="4.5" height="15" rx="1.2"/><rect x="14" y="4.5" width="4.5" height="15" rx="1.2"/></svg>
+            </button>
+            <button class="transport-btn" id="stepForwardBtn" title="前进 1 帧 (→)" aria-label="下一帧"><svg class="transport-solid" viewBox="0 0 24 24" aria-hidden="true"><rect x="17.7" y="5" width="2.3" height="14" rx="1.15"/><path d="M6.3 5.5c-.8-.5-1.8.1-1.8 1v11c0 .9 1 1.5 1.8 1l8.3-5.5c.8-.5.8-1.5 0-2z"/></svg></button>
+            <button class="transport-btn" id="stepForward5Btn" title="前进 5 帧 (Shift+→)"><span>+5</span></button>
+            <button class="transport-btn" id="reverseBtn" title="倒放 (J)"><svg viewBox="0 0 24 24"><path d="M7 5v14M18 6l-9 6 9 6z"/></svg><span class="mini-label">REV</span></button>
+          </div>
+          <div class="timecode-block">
+            <span class="current-timecode" id="currentTimecode">00:00:00:00</span>
+            <span class="slash">/</span>
+            <span id="durationTimecode">00:00:00:00</span>
+            <span class="transport-rule"></span>
+            <span class="timeline-readout"><b id="frameReadout">FRAME 00000</b><span id="secondsReadout">0.000 SEC</span></span>
+          </div>
+          <div class="transport-right">
+            <details class="volume-disclosure" id="volumeDisclosure">
+              <summary class="transport-btn" title="音量" aria-label="展开音量"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4zM16 9c1.5 1.5 1.5 4.5 0 6M19 6c3.2 3.2 3.2 8.8 0 12"/></svg></summary>
+              <div class="volume-control">
+              <button class="transport-btn" id="muteBtn" title="静音" aria-label="静音"><svg viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4zM16 9c1.5 1.5 1.5 4.5 0 6M19 6c3.2 3.2 3.2 8.8 0 12"/></svg></button>
+              <input id="volumeSlider" type="range" min="0" max="100" value="100" step="1" aria-label="音量">
+              <output id="volumeValue" for="volumeSlider">100%</output>
+            </div>
+            </details>
+            <details class="transport-settings" id="transportSettings">
+              <summary class="transport-btn" title="播放与画面设置" aria-label="播放与画面设置"><svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 12h3M11 12h9M4 17h8M16 17h4"/><circle cx="16" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="14" cy="17" r="2"/></svg><span>播放设置</span></summary>
+              <div class="transport-settings-popover">
+                <div class="settings-section-label">播放</div>
+                <label class="settings-row"><span>项目帧率</span><input id="fpsInput" type="number" value="24" min="1" max="240" step="0.001"></label>
+                <div class="settings-row speed-settings-row"><span>播放速度</span><div class="speed-control"><button id="speedDownBtn" title="降低 0.05×">−</button><input id="speedRange" type="range" min="0.1" max="4" value="1" step="0.05" aria-label="播放速度"><input id="speedNumber" type="number" min="0.1" max="4" value="1.00" step="0.05" aria-label="精确播放速度"><span>×</span><button id="speedResetBtn" title="恢复 1.00×">↺</button><button id="speedUpBtn" title="提高 0.05×">＋</button></div></div>
+                <div class="settings-row"><span>打开后自动播放</span><button class="settings-switch on" id="autoplaySwitch" type="button" role="switch" aria-checked="true" title="打开视频后自动播放"><i></i></button></div>
+                <label class="settings-row"><span>播放结束后</span><select id="endBehaviorSelect"><option value="stop">停在最后一帧</option><option value="rewind">返回第一帧</option><option value="loop">循环播放</option></select></label>
+                <div class="settings-section-label">画面</div>
+                <div class="settings-row"><span>影院灯效</span><button class="settings-switch on" id="ambientSwitch" type="button" role="switch" aria-checked="true" aria-label="影院灯效"><i></i></button></div>
+                <div class="settings-row"><span>画面比例</span><div class="viewer-scale-control"><select id="viewerZoomSelect" aria-label="画面显示比例"><option value="fit">适应</option><option value="0.25">25%</option><option value="0.5">50%</option><option value="1">1:1</option><option value="2">200%</option><option value="custom" hidden>自定义</option></select><output id="viewerZoomValue">适应</output><button id="viewerFitBtn" title="复原为适应播放器大小" aria-label="复原画面大小">↺</button></div></div>
+                <div class="settings-section-label">时间轴</div>
+                <div class="settings-row"><span>悬停大图预览</span><button class="settings-switch on" id="hoverPreviewSwitch" type="button" role="switch" aria-checked="true" title="显示或隐藏悬停大图预览"><i></i></button></div>
+                <div class="settings-row preview-size-settings-row"><span>悬停大图尺寸</span><div class="preview-size-control"><button id="previewSizeDownBtn" title="缩小 2px">−</button><input id="previewSizeRange" type="range" min="140" max="320" value="196" step="2" aria-label="悬停大图宽度"><input id="previewSizeNumber" type="number" min="140" max="320" value="196" step="2" aria-label="悬停大图精确宽度"><span>px</span><button id="previewSizeResetBtn" title="恢复默认 196px">↺</button><button id="previewSizeUpBtn" title="放大 2px">＋</button></div></div>
+                <details class="settings-advanced">
+                <summary>启动与系统</summary>
+                <label class="settings-row"><span>默认界面模式</span><select id="startupModeSelect"><option value="classic">经典模式</option><option value="clean" selected>纯净模式</option></select></label>
+                <div class="settings-row"><span>系统关联</span><button class="settings-action-button" id="openDefaultAppsBtn">默认应用…</button></div>
+                </details>
+              </div>
+            </details>
+            <button class="transport-btn" id="togglePanelBtn" title="显示分析面板 (F2)" aria-label="显示分析面板" aria-pressed="false"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg></button>
+            <button class="transport-btn" id="cleanModeBtn" title="纯净模式 (P)" aria-label="进入纯净模式" aria-pressed="false"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="4"/><path d="M8 8.5h2.5M13.5 8.5H16M8 15.5h2.5M13.5 15.5H16"/></svg></button>
+            <button class="transport-btn" id="fullscreenBtn" title="全屏"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+            <button class="transport-btn clean-mode-exit" id="cleanModeExitBtn" title="退出纯净模式 (Esc)" aria-label="退出纯净模式"><svg viewBox="0 0 24 24"><path d="M9 4v5H4M15 4v5h5M20 15h-5v5M4 15h5v5"/></svg></button>
+          </div>
+        </div>
+
+        <section class="timeline-panel">
+          <div class="timeline-zoom-guide" aria-label="时间轴缩放提示">
+            <span><kbd>Ctrl</kbd> + 滚轮缩放</span>
+            <output id="timelineZoomValue">100%</output>
+            <button id="resetTimelineZoomBtn" title="恢复时间轴为 100% (Alt+0)">复原</button>
+          </div>
+          <div class="timeline-ruler" id="timelineRuler"></div>
+          <div class="timeline-track-wrap" id="timelineTrackWrap">
+            <div class="timeline-track" id="timelineTrack">
+              <div class="loop-range" id="loopRange"></div>
+              <div class="loop-point loop-in" id="loopInMarker"><span>A</span></div>
+              <div class="loop-point loop-out" id="loopOutMarker"><span>B</span></div>
+              <div class="timeline-progress" id="timelineProgress"></div>
+              <div class="annotation-marker-layer" id="annotationMarkerLayer"></div>
+              <div class="marker-layer" id="markerLayer"></div>
+              <div class="playhead" id="playhead"><span></span></div>
+            </div>
+          </div>
+        </section>
+        </div>
+      </section>
+
+      <aside class="analysis-panel">
+        <nav class="panel-tabs">
+          <button class="panel-tab active" data-panel="bookmarks">书签 <span id="bookmarkCount">0</span></button>
+          <button class="panel-tab" data-panel="annotations">批注 <span id="annotationCount">0</span></button>
+          <button class="panel-tab" data-panel="properties">属性</button>
+          <button class="panel-close-button" id="closePanelBtn" title="隐藏分析面板" aria-label="隐藏分析面板"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+        </nav>
+
+        <section class="panel-view active" id="bookmarksPanel">
+          <div class="bookmark-actions">
+            <div class="search-box">
+              <svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>
+              <input id="bookmarkSearch" placeholder="搜索书签、标签、描述…">
+            </div>
+            <div class="filter-row">
+              <select id="sortSelect" aria-label="排序">
+                <option value="frame">按帧排序</option>
+                <option value="title">按标题排序</option>
+                <option value="rating">按评分排序</option>
+                <option value="created">按创建时间</option>
+              </select>
+              <button class="filter-button" id="favoriteFilter" title="仅收藏" aria-label="仅收藏"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/></svg></button>
+              <button class="filter-button active" id="listViewBtn" title="列表视图" aria-label="列表视图"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg></button>
+              <button class="filter-button" id="gridViewBtn" title="缩略图视图" aria-label="缩略图视图"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></button>
+            </div>
+          </div>
+          <div class="bookmark-list" id="bookmarkList">
+            <div class="panel-empty" id="bookmarkEmpty">
+              <div class="empty-lines"><i></i><i></i><i></i></div>
+              <b>还没有书签</b>
+              <p>在关键帧按 <kbd>M</kbd> 添加分析记录</p>
+            </div>
+          </div>
+          <button class="add-bookmark-button" id="addBookmarkBtn"><span>＋</span> 添加当前帧书签 <kbd>M</kbd></button>
+        </section>
+
+        <section class="panel-view" id="annotationsPanel">
+          <div class="panel-section-title annotation-panel-header">
+            <div class="scope-switch" aria-label="批注范围">
+              <button data-annotation-scope="current">当前帧</button>
+              <button class="active" data-annotation-scope="all">全部批注</button>
+            </div>
+            <div class="annotation-header-actions"><button id="exportAnnotatedFrameBtn" title="导出当前带批注画面">导出帧</button><button id="toggleAnnotationsBtn">全部隐藏</button></div>
+          </div>
+          <div class="annotation-list" id="annotationList"></div>
+          <div class="panel-empty" id="annotationEmpty">
+            <b>此视频还没有批注</b>
+            <p>在画面上右键打开批注工具环</p>
+          </div>
+        </section>
+
+        <section class="panel-view" id="propertiesPanel">
+          <div class="property-group">
+            <h3>媒体信息</h3>
+            <dl>
+              <div><dt>文件名</dt><dd id="propFilename">—</dd></div>
+              <div><dt>分辨率</dt><dd id="propResolution">—</dd></div>
+              <div><dt>时长</dt><dd id="propDuration">—</dd></div>
+              <div><dt>帧率</dt><dd id="propFps">24 fps</dd></div>
+              <div><dt>估算总帧</dt><dd id="propFrames">—</dd></div>
+              <div><dt>解码</dt><dd><span class="hardware-badge">GPU 优先</span></dd></div>
+            </dl>
+          </div>
+          <div class="property-group">
+            <h3>工作区</h3>
+            <dl>
+              <div><dt>书签</dt><dd id="propBookmarks">0</dd></div>
+              <div><dt>批注帧</dt><dd id="propAnnotations">0</dd></div>
+              <div><dt>自动保存</dt><dd><span class="switch on" id="autosaveSwitch"><i></i></span></dd></div>
+            </dl>
+          </div>
+          <div class="property-group interaction-settings">
+            <h3>画面 Scrub</h3>
+            <label for="scrubSensitivity">
+              <span>拖动速度</span>
+              <output id="scrubSensitivityValue">0.30 帧/像素</output>
+            </label>
+            <input id="scrubSensitivity" type="range" min="0.05" max="3" value="0.3" step="0.05">
+            <div class="range-labels"><span>精细</span><span>快速</span></div>
+          </div>
+          <button class="secondary-button" id="resetWorkspaceBtn">清空当前工作区</button>
+        </section>
+
+        <section class="notes-section" id="notesSection">
+          <div class="notes-header"><span>帧笔记</span><span id="notesSaved">已保存</span></div>
+          <textarea id="bookmarkNotes" placeholder="选中书签后记录 Shader 思路、实现方式、疑问或 TODO…" disabled></textarea>
+        </section>
+      </aside>
+    </main>
+
+  </div>
+
+  <div class="timeline-tooltip" id="timelineTooltip"><canvas id="timelinePreviewImage" aria-label="时间轴帧预览"></canvas><em class="preview-status">正在取帧…</em><div><b>F 00000</b><span>00:00:00:00</span></div></div>
+
+  <div class="modal-backdrop" id="helpModal" aria-hidden="true">
+    <div class="shortcut-modal" role="dialog" aria-modal="true" aria-labelledby="shortcutTitle">
+      <div class="modal-header"><div><h2 id="shortcutTitle">快捷键</h2></div><button id="closeHelpBtn" aria-label="关闭快捷键窗口"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+      <div class="shortcut-grid">
+        <div><kbd>Space</kbd><span>播放 / 暂停</span></div><div><kbd>J K L</kbd><span>倒放 / 停止 / 播放</span></div>
+        <div><kbd id="shortcutPreviousFrame">D / ←</kbd><span>上一帧</span></div><div><kbd id="shortcutNextFrame">F / →</kbd><span>下一帧</span></div>
+        <div><kbd>I / O</kbd><span>设置 A / B 循环点</span></div><div><kbd>Shift + I / O</kbd><span>清除 A / B 循环点</span></div>
+        <div><kbd>Ctrl + 滚轮</kbd><span>缩放时间轴</span></div><div><kbd id="shortcutResetView">Ctrl + 0</kbd><span>复原画面比例</span></div>
+        <div><kbd id="shortcutResetTimeline">Alt + 0</kbd><span>复原时间轴缩放</span></div><div><kbd>Shift + ← / →</kbd><span>前后 5 帧</span></div>
+        <div><kbd>右键点击</kbd><span>批注工具环 / 再次右键取消</span></div><div><kbd>右键拖动</kbd><span>使用上次工具批注</span></div>
+        <div><kbd>Shift + 右拖</kbd><span>临时橡皮擦</span></div><div><kbd>Alt + 右拖</kbd><span>临时箭头</span></div>
+        <div><kbd>Ctrl + Z</kbd><span>撤销批注</span></div><div><kbd>Ctrl + 画面滚轮</kbd><span>缩放视频画面</span></div>
+        <div><kbd>中键拖动</kbd><span>平移缩放后的画面</span></div><div><kbd>画图时滚轮</kbd><span>调整笔刷粗细</span></div>
+        <div><kbd>M</kbd><span>添加书签</span></div><div><kbd>Delete</kbd><span>删除选中项</span></div>
+        <div><kbd>Ctrl + O</kbd><span>打开视频</span></div><div><kbd>Ctrl + S</kbd><span>保存工作区</span></div>
+        <div><kbd>Ctrl + C</kbd><span>复制当前帧</span></div><div><kbd>Ctrl + Shift + C</kbd><span>复制带批注帧</span></div>
+        <div><kbd>G</kbd><span>LUMA 明暗检查</span></div><div><kbd id="shortcutPixelInspector">X</kbd><span>拾色</span></div>
+        <div><kbd id="shortcutGuides">H</kbd><span>隐藏 / 恢复构图辅助</span></div><div><kbd>—</kbd><span>辅助线不会进入导出</span></div>
+        <div><kbd>Alt + 拖动</kbd><span>1 像素移动 1 帧</span></div><div><kbd>P</kbd><span>进入 / 退出纯净模式</span></div>
+        <div><kbd>Esc</kbd><span>取消菜单 / 退出纯净模式</span></div><div><kbd>F2</kbd><span>显示 / 隐藏分析面板</span></div>
+        <div><kbd>画面左键</kbd><span>点击播放暂停 / 拖动 Scrub</span></div>
+      </div>
+      <details class="shortcut-customizer">
+        <summary>自定义快捷键</summary>
+        <div class="shortcut-editor" id="shortcutEditor">
+          <button data-shortcut-action="togglePlay"><span>播放 / 暂停</span><kbd></kbd></button>
+          <button data-shortcut-action="previousFrame"><span>上一帧</span><kbd></kbd></button>
+          <button data-shortcut-action="nextFrame"><span>下一帧</span><kbd></kbd></button>
+          <button data-shortcut-action="loopIn"><span>设置 A 点</span><kbd></kbd></button>
+          <button data-shortcut-action="loopOut"><span>设置 B 点</span><kbd></kbd></button>
+          <button data-shortcut-action="bookmark"><span>添加书签</span><kbd></kbd></button>
+          <button data-shortcut-action="luma"><span>LUMA</span><kbd></kbd></button>
+          <button data-shortcut-action="pixelInspector"><span>拾色</span><kbd></kbd></button>
+          <button data-shortcut-action="toggleGuides"><span>构图辅助</span><kbd></kbd></button>
+          <button data-shortcut-action="cleanMode"><span>纯净模式</span><kbd></kbd></button>
+          <button data-shortcut-action="togglePanel"><span>分析面板</span><kbd></kbd></button>
+          <button data-shortcut-action="resetView"><span>复原画面</span><kbd></kbd></button>
+          <button data-shortcut-action="resetTimeline"><span>复原时间轴</span><kbd></kbd></button>
+        </div>
+        <button class="reset-shortcuts-button" id="resetShortcutsBtn">恢复默认快捷键</button>
+      </details>
+      <div class="modal-tip"><b>画面拖拽</b><span>左右拖动逐帧 · Shift 慢速 · Alt 精确到 1 像素 1 帧</span></div>
+    </div>
+  </div>
+
+  <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+  <div class="pixel-inspector-hud" id="pixelInspectorHud" aria-hidden="true"><b>#000000</b><span class="pixel-source">Source RGB 0 0 0</span><span class="pixel-view">View RGB 0 0 0</span><small>X 0 · Y 0 · L 0</small><i></i><button id="copyPixelBtn" title="复制像素信息" aria-label="复制像素信息"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5H5v11h3"/></svg></button></div>
+
+  <div class="modal-backdrop" id="contactSheetModal" aria-hidden="true">
+    <div class="contact-sheet-modal" role="dialog" aria-modal="true" aria-labelledby="contactSheetTitle">
+      <div class="modal-header"><div><h2 id="contactSheetTitle">导出联系表</h2><small>将关键帧整理为一张 PNG 图片</small></div><button id="closeContactSheetBtn" aria-label="关闭导出窗口"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+      <div class="contact-sheet-options">
+        <section><h3>帧来源</h3><label><input id="contactBookmarks" type="checkbox" checked>书签</label><label><input id="contactAnnotations" type="checkbox" checked>批注帧</label><label><input id="contactLoop" type="checkbox">I/O 区间均匀取样</label><label class="inline-option">取样数<input id="contactSampleCount" type="number" min="4" max="24" value="12"></label></section>
+        <section><h3>版式</h3><label class="inline-option">列数<select id="contactColumns"><option>2</option><option>3</option><option selected>4</option><option>5</option></select></label><label class="inline-option">输出宽度<select id="contactWidth"><option>1920</option><option>2560</option><option selected>3840</option></select></label><label><input id="contactDrawAnnotations" type="checkbox" checked>绘制当前帧批注</label></section>
+      </div>
+      <div class="contact-frame-header"><span>帧列表 · 自动去重并按时间排序</span><button id="contactSelectAllBtn">全部选择</button></div>
+      <div class="contact-frame-list" id="contactFrameList"></div>
+      <div class="contact-progress" id="contactProgress" hidden><span></span><div><i></i></div></div>
+      <div class="contact-actions"><button id="cancelContactGenerationBtn" hidden>取消生成</button><button class="secondary-button" id="closeContactSheetFooterBtn">关闭</button><button class="primary-button" id="generateContactSheetBtn">生成 PNG</button></div>
+    </div>
+  </div>
+  <div class="context-menu" id="bookmarkContextMenu" role="menu" aria-hidden="true">
+    <button data-action="jump"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17v-5a4 4 0 0 1 4-4h12M15 3l5 5-5 5"/></svg></span>跳转到此帧</button>
+    <button data-action="rename"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 4 5 5M4 16 16 4a2 2 0 0 1 4 4L8 20H4z"/></svg></span>重命名</button>
+    <button data-action="tag"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h8l10 10-8 8L3 11z"/><circle cx="7" cy="7" r="1"/></svg></span>编辑标签</button>
+    <button data-action="rating"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20V10M12 20V4M19 20v-7"/></svg></span>设置评分</button>
+    <div class="context-colors" aria-label="书签颜色">
+      <i data-color="#ff5a62"></i><i data-color="#ff9f43"></i><i data-color="#f5d94e"></i><i data-color="#42d7c8"></i><i data-color="#4b8dff"></i><i data-color="#8b5cf6"></i>
+    </div>
+    <button data-action="favorite"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/></svg></span>收藏 / 取消收藏</button>
+    <button data-action="duplicate"><span><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V3H3v13h5"/></svg></span>复制书签</button>
+    <button data-action="screenshot"><span><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1"/><path d="m3 17 5-5 4 4 4-6 5 7"/></svg></span>导出当前帧</button>
+    <div class="context-rule"></div>
+    <button class="danger" data-action="delete"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></span>删除</button>
+  </div>
+  <div class="radial-dismiss-layer" id="radialDismissLayer" aria-hidden="true"></div>
+  <div class="annotation-radial-menu" id="annotationRadialMenu" role="dialog" aria-label="批注工具" aria-hidden="true">
+    <div class="annotation-tools-heading"><span>批注工具</span><span class="annotation-tool-current"><b id="radialToolLabel">画笔</b><small id="annotationSizeLabel">4 px</small></span><button type="button" class="radial-center" title="关闭批注工具" aria-label="关闭批注工具"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div>
+    <div class="radial-ring">
+      <button class="radial-tool radial-select" data-quick-tool="select" title="浏览 / 画面 Scrub"><svg viewBox="0 0 24 24"><path d="M6 3l12 9-6 1.5L9 19z"/></svg></button>
+      <button class="radial-tool radial-brush" data-quick-tool="brush" title="画笔"><svg viewBox="0 0 24 24"><path d="M4 17c4-6 7 4 10-2s4-7 6-10"/></svg></button>
+      <button class="radial-tool radial-arrow" data-quick-tool="arrow" title="箭头"><svg viewBox="0 0 24 24"><path d="M5 19 19 5M11 5h8v8"/></svg></button>
+      <button class="radial-tool radial-rectangle" data-quick-tool="rectangle" title="矩形"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1"/></svg></button>
+      <button class="radial-tool radial-circle" data-quick-tool="circle" title="圆形"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/></svg></button>
+      <button class="radial-tool radial-highlight" data-quick-tool="highlight" title="高亮"><svg viewBox="0 0 24 24"><path d="m7 16 8-8 3 3-8 8H7zM5 20h14"/></svg></button>
+      <button class="radial-tool radial-text" data-quick-tool="text" title="文字"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7V4h14v3M12 4v16M8 20h8"/></svg></button>
+      <button class="radial-tool radial-eraser" data-quick-tool="eraser" title="橡皮擦"><svg viewBox="0 0 24 24"><path d="m7 16 8-8 4 4-7 7H8zM11 19h9"/></svg></button>
+    </div>
+    <div class="radial-settings">
+      <label class="radial-color" title="批注颜色"><input id="radialAnnotationColor" type="color" value="#8b5cf6"><span></span></label>
+      <button id="annotationSizeDown" title="减小粗细">−</button>
+      <input id="annotationSizeRange" type="range" min="1" max="24" value="4" step="1" aria-label="批注粗细">
+      <button id="annotationSizeUp" title="增大粗细">＋</button>
+      <button class="radial-clear" id="clearFrameAnnotations" title="清除此帧全部批注"><svg viewBox="0 0 24 24"><path d="m8 8 8 8m0-8-8 8M5 4h14v16H5z"/></svg></button>
+    </div>
+  </div>
+  <div class="annotation-text-editor" id="annotationTextEditor" aria-hidden="true">
+    <input id="annotationTextInput" maxlength="120" placeholder="输入批注文字，Enter 确认">
+    <button id="confirmAnnotationText" title="确认文字批注">确认</button>
+  </div>
+  <script src="media-formats.js"></script>
+  <script src="playback-adapter.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

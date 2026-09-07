@@ -1,0 +1,32 @@
+{
+  "mpv": {
+    "version": "0.41.0",
+    "url": "https://github.com/mpv-player/mpv/archive/refs/tags/v0.41.0.zip",
+    "sha256": "7a37ded4ae1655528525c008736e3abd2f0f360e94140107d62185d056a20c46"
+  },
+  "ffmpeg": {
+    "version": "6.1.1",
+    "url": "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n6.1.1.zip",
+    "sha256": "096719254459b559c6ea2e5564256cee5efbd842260142ed1a8e33fc34d755cc"
+  },
+  "libplacebo": {
+    "version": "6.338.2",
+    "url": "https://github.com/haasn/libplacebo/archive/refs/tags/v6.338.2.zip",
+    "sha256": "2364bef789cc85e5216c04f9d1cdf06b28db840aef7933b85f1126576b32ff9a"
+  },
+  "libass": {
+    "version": "0.17.4",
+    "url": "https://github.com/libass/libass/archive/refs/tags/0.17.4.zip",
+    "sha256": "c1f8eb0dcf6843d2a4ea45aaf698d3fffcd82b23a9463897b04508aa95ccbf8d"
+  },
+  "dependencies": {
+    "url": "https://github.com/Paxton-PKJ/libmpv/releases/download/release/libmpv-lgpl-windows-x86_64.zip",
+    "sha256": "30fecef3c97d9634190bc5ac0a023694b414d3fd9e0938dbadd802ba34bf8794",
+    "buildCommit": "4aec8f7e9e4cff9e2d997ca8574b220d9de1c432",
+    "note": "Use dependency DLLs only; replace this archive's mpv 0.38.0 with our 0.41.0 build."
+  },
+  "llvm": {
+    "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260826/llvm-mingw-20260826-ucrt-x86_64.zip",
+    "sha256": "ae601f4e0f72bbdf441ad2df8bb16f037e2e9251559ea6b37b4057aef39c06c3"
+  }
+}

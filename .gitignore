@@ -1,0 +1,10 @@
+node_modules/
+out/
+*.log
+*.tmp
+.DS_Store
+
+.cache/
+native/mpv/build/
+native/mpv/*.exp
+native/mpv/*.lib
