@@ -127,7 +127,14 @@
     seek(time) { this.seeking = true; this.fire('seek', time); }
     step(direction) { this.pause(); this.seeking = true; this.fire('step', direction); }
     seekFrameExact(frame, fps = this.projectFps) { return this.frameOperation('seek', frame / fps); }
-    stepFrame(direction) { return this.frameOperation('step', direction); }
+    stepFrame(direction, fps = this.projectFps) {
+      const sourceFps = Number(this.media?.sourceFps);
+      if (this.media?.mediaKind === 'video' && sourceFps && Math.abs(sourceFps - fps) > .001) {
+        const time = Math.max(0, Math.min(this.duration, this.currentTime + direction / fps));
+        return this.frameOperation('seek', time);
+      }
+      return this.frameOperation('step', direction);
+    }
     async frameOperation(command, value) {
       const id = await this.ensureSession();
       const operationId = ++this.operationSequence;

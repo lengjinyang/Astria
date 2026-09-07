@@ -29,6 +29,10 @@ module.exports = async function smoke(window, catalog, app) {
     await scrub.end();
     const scrubTrace=[...scrub.trace],contiguous=scrubTrace.every((frame,index)=>!index||Math.abs(frame-scrubTrace[index-1])===1);
     if(!contiguous||scrub.snapshot().displayFrame!==null||!p.paused)throw new Error('Scrub sequence failed '+JSON.stringify({scrubTrace,state:scrub.snapshot(),paused:p.paused}));
+    const sourceFps=p.media.sourceFps||p.media.fps||24,customFps=sourceFps*2,originalFrameOperation=p.frameOperation.bind(p);let customStepCommand;
+    p.frameOperation=(command,value)=>{customStepCommand={command,value};return Promise.resolve({time:value});};
+    await p.stepFrame(1,customFps);p.frameOperation=originalFrameOperation;
+    if(customStepCommand?.command!=='seek'||Math.abs(customStepCommand.value-(p.currentTime+1/customFps))>.0001)throw new Error('Custom FPS step mapping failed '+JSON.stringify(customStepCommand));
     p.seek(0.5); await wait(()=>!p.seeking && Math.abs(p.currentTime-.5)<.06);
     const before=p.currentTime; p.step(1); await wait(()=>!p.seeking && p.currentTime>before);
     p.step(-1); await wait(()=>!p.seeking && Math.abs(p.currentTime-before)<.01);
