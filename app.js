@@ -44,15 +44,18 @@
   els.video = playback.surface;
   els.videoInput.accept = (desktopAPI ? AstriaFormats.selectable : AstriaFormats.browser).map(ext => '.' + ext).join(',');
   const state = {
-    fileName: '', fileMeta: null, fps: 24, bookmarks: [], annotations: [], selectedBookmarkIds: [],
+    fileName: '', fileMeta: null, fps: 24, fpsMode: 'source', bookmarks: [], annotations: [], selectedBookmarkIds: [],
     selectedAnnotationId: null, selectedAnnotationFrame: null, activeTool: 'select', annotationColor: '#8b5cf6', annotationVisible: true,
     timelineZoom: 1, reverseTimer: null, reverseSeekInFlight: false, reverseAnchorFrame: 0, reverseAnchorTime: 0, reverseFrame: 0, playbackUiRaf: null, isReverse: false, scrub: null, draw: null, favoriteOnly: false,
     view: 'list', autosave: true, currentObjectUrl: null, saveTimer: null, contextBookmarkId: null,
-    timelineScrub: null, timelineSeek: { pendingFrame: null, inFlight: false }, annotationScope: 'all',
+    timelineScrub: null, annotationScope: 'all',
     lumaMode: false, lumaContrast: 1, viewerScrubSensitivity: 0.3, lastFrameContent: null,
     volume: 1, muted: false, previousVolume: 1, loopInFrame: null, loopOutFrame: null,
-    frameCache: new Map(), frameCacheCapture: null, frameCachePending: false, frameCacheHandle: null,
+    frameCache: new Map(), frameCacheSizes: new Map(), frameCacheBytes: 0, frameCacheCapture: null, frameCachePending: false, frameCacheHandle: null,
     frameCacheMax: 80, frameCacheGeneration: 0, currentMediaKey: null, sourcePath: null,
+    scrubDecoder: null, scrubDecoderPromise: null, scrubDecoderFrame: null, scrubDecoderMediaId: null,
+    scrubWorkerBusy: false, scrubWorkerPromise: null, scrubPrefetchTimer: null, scrubInteraction: 0, scrubDisplayFrame: null, scrubFinalizing: false,
+    scrubController: { active: false, pointerTargetFrame: null, targetFrame: null, presentedFrame: null, direction: 0, inFlight: false },
     cleanMode: false, cleanControlsTimer: null, cleanPreviousTool: 'select',
     quickAnnotationTool: 'brush', annotationSize: 4, annotationUndo: [], quickGesture: null, pendingTextAnnotation: null,
     viewerZoomMode: 'fit', viewerZoom: 1, viewerPan: { x: 0, y: 0 }, viewerPanGesture: null,
@@ -72,11 +75,13 @@
   const uid = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
   const frameDuration = () => 1 / Math.max(1, state.fps);
-  const currentFrame = () => state.isReverse ? Math.round(state.reverseFrame) : Math.round(playback.currentTime * state.fps);
+  const totalFrames = () => playback.media?.mediaKind === 'sequence' ? playback.media.totalFrames : Math.max(1, Math.round((playback.duration || 0) * state.fps));
+  const lastFrame = () => Math.max(0, totalFrames() - 1);
+  const currentFrame = () => Number.isFinite(state.scrubDisplayFrame) ? state.scrubDisplayFrame :
+    clamp(state.isReverse ? Math.round(state.reverseFrame) : Math.round(playback.currentTime * state.fps), 0, lastFrame());
   const sourceFrame = frame => Math.round(frame) + (state.fileMeta?.sourceFrameOffset || 0);
   const missingFrameNotice = document.createElement('div');
   missingFrameNotice.className = 'missing-frame-notice'; missingFrameNotice.hidden = true; els.mediaSurface.appendChild(missingFrameNotice);
-  const totalFrames = () => playback.media?.mediaKind === 'sequence' ? playback.media.totalFrames : Math.round((playback.duration || 0) * state.fps);
   const selectedBookmark = () => state.bookmarks.find(b => state.selectedBookmarkIds.includes(b.id));
 
   function formatTimecode(seconds) {
@@ -463,7 +468,7 @@
     state.reverseTimer = null;
     if (!state.isReverse || state.reverseSeekInFlight || !playback.duration) return;
     const loopStartFrame = hasLoopRange() ? state.loopInFrame : 0;
-    const loopEndFrame = hasLoopRange() ? state.loopOutFrame : totalFrames();
+    const loopEndFrame = hasLoopRange() ? state.loopOutFrame : lastFrame();
     const elapsedSeconds = Math.max(0, now - state.reverseAnchorTime) / 1000;
     let targetFrame = state.reverseAnchorFrame - Math.floor(elapsedSeconds * state.fps * state.playbackSpeed);
 
@@ -508,8 +513,6 @@
     const startFrame = Math.round(playback.currentTime * state.fps);
     playback.pause();
     stopReverse();
-    state.timelineSeek.pendingFrame = null;
-    state.timelineSeek.inFlight = false;
     state.isReverse = true;
     revealCleanControls();
     state.reverseAnchorFrame = startFrame;
@@ -523,7 +526,8 @@
   function seekFrame(frame, shouldPause = true, renderFrameContent = true) {
     if (!playback.duration) return;
     if (shouldPause) pause();
-    const targetFrame = clamp(frame, 0, totalFrames());
+    const targetFrame = clamp(frame, 0, lastFrame());
+    state.scrubDisplayFrame = null;
     const selectedAnnotation = state.annotations.find(a => a.id === state.selectedAnnotationId);
     if (selectedAnnotation && selectedAnnotation.frame !== Math.round(targetFrame)) { state.selectedAnnotationId = null; state.selectedAnnotationFrame = null; }
     showCachedFrame(targetFrame);
@@ -583,7 +587,7 @@
       if (hasLoopRange() && playback.currentTime >= state.loopOutFrame / state.fps - frameDuration() * .25) {
         playback.currentTime = state.loopInFrame / state.fps;
       }
-      if (!state.timelineScrub && !state.scrub && !state.timelineSeek.inFlight) updateUI();
+      if (!state.timelineScrub && !state.scrub && !state.scrubController.active) updateUI();
       state.playbackUiRaf = requestAnimationFrame(tick);
     };
     state.playbackUiRaf = requestAnimationFrame(tick);
@@ -591,10 +595,11 @@
 
   function updatePlaybackUI(time = playback.currentTime || 0, frame = Math.round(time * state.fps)) {
     const t = time, duration = playback.duration || 0;
+    frame = clamp(Math.round(frame), 0, lastFrame());
     const missing = playback.media?.missingFrames?.includes(sourceFrame(frame));
     missingFrameNotice.hidden = !missing;
     missingFrameNotice.textContent = missing ? `缺失帧 ${sourceFrame(frame)}` : '';
-    const ratio = duration ? clamp(t / duration, 0, 1) : 0;
+    const ratio = lastFrame() ? clamp(frame / lastFrame(), 0, 1) : 0;
     els.currentTimecode.textContent = formatTimecode(t);
     els.durationTimecode.textContent = formatTimecode(duration);
     els.frameReadout.textContent = `FRAME ${String(sourceFrame(frame)).padStart(5, '0')}`;
@@ -644,6 +649,8 @@
     state.frameCachePending = false;
     state.frameCache.forEach(frame => frame.close?.());
     state.frameCache.clear();
+    state.frameCacheSizes.clear();
+    state.frameCacheBytes = 0;
     state.frameCacheCapture = null;
     els.cacheCtx.clearRect(0, 0, els.cacheCanvas.width, els.cacheCanvas.height);
     els.cacheCanvas.classList.remove('visible');
@@ -653,12 +660,19 @@
   function putCachedFrame(frame, image) {
     const previous = state.frameCache.get(frame);
     previous?.close?.();
+    state.frameCacheBytes -= state.frameCacheSizes.get(frame) || 0;
     state.frameCache.delete(frame);
+    state.frameCacheSizes.delete(frame);
     state.frameCache.set(frame, image);
-    while (state.frameCache.size > state.frameCacheMax) {
+    const bytes = Math.max(1, image.width) * Math.max(1, image.height) * 4;
+    state.frameCacheSizes.set(frame, bytes);
+    state.frameCacheBytes += bytes;
+    while (state.frameCache.size > state.frameCacheMax || state.frameCacheBytes > 96 * 1024 * 1024) {
       const oldestFrame = state.frameCache.keys().next().value;
       state.frameCache.get(oldestFrame)?.close?.();
+      state.frameCacheBytes -= state.frameCacheSizes.get(oldestFrame) || 0;
       state.frameCache.delete(oldestFrame);
+      state.frameCacheSizes.delete(oldestFrame);
     }
     updateCacheStatus();
   }
@@ -677,7 +691,7 @@
       if (surface.width !== width || surface.height !== height) { surface.width = width; surface.height = height; }
       surface.getContext('2d', { alpha: false }).drawImage(playback.currentFrameCanvas, 0, 0, width, height);
       const bytesPerFrame = width * height * 4;
-      state.frameCacheMax = clamp(Math.floor(160 * 1024 * 1024 / bytesPerFrame), 36, 144);
+      state.frameCacheMax = clamp(Math.floor(96 * 1024 * 1024 / bytesPerFrame), 24, 144);
       let image;
       if (surface.transferToImageBitmap) image = surface.transferToImageBitmap();
       else if (window.createImageBitmap) image = await createImageBitmap(surface);
@@ -735,6 +749,116 @@
     state.frameCacheHandle = playback.requestVideoFrameCallback(watchFrame);
   }
 
+  async function cacheFrameFromMedia(media, frame, generation = state.frameCacheGeneration) {
+    if (!media?.currentFrameCanvas || !media.videoWidth || generation !== state.frameCacheGeneration) return false;
+    const source = media.currentFrameCanvas;
+    const sourceWidth = source.width || media.videoWidth, sourceHeight = source.height || media.videoHeight;
+    const scale = Math.min(1, 960 / sourceWidth, 540 / sourceHeight);
+    const width = Math.max(2, Math.round(sourceWidth * scale)), height = Math.max(2, Math.round(sourceHeight * scale));
+    const canvas = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(width, height) : document.createElement('canvas');
+    canvas.width = width; canvas.height = height;
+    canvas.getContext('2d', { alpha: false }).drawImage(source, 0, 0, width, height);
+    let image;
+    if (canvas.transferToImageBitmap) image = canvas.transferToImageBitmap();
+    else if (window.createImageBitmap) image = await createImageBitmap(canvas);
+    else { image = document.createElement('canvas'); image.width = width; image.height = height; image.getContext('2d').drawImage(canvas, 0, 0); }
+    if (generation !== state.frameCacheGeneration) { image.close?.(); return false; }
+    putCachedFrame(frame, image);
+    return true;
+  }
+
+  function resetScrubDecoder() {
+    clearTimeout(state.scrubPrefetchTimer); state.scrubPrefetchTimer = null;
+    state.scrubInteraction += 1;
+    const decoder = state.scrubDecoder;
+    state.scrubDecoder = null; state.scrubDecoderPromise = null; state.scrubDecoderFrame = null; state.scrubDecoderMediaId = null;
+    state.scrubWorkerBusy = !!state.scrubWorkerPromise; state.scrubDisplayFrame = null; state.scrubFinalizing = false;
+    Object.assign(state.scrubController, { active: false, pointerTargetFrame: null, targetFrame: null, presentedFrame: null, direction: 0, inFlight: false });
+    if (decoder && decoder !== playback) Promise.resolve(decoder.destroy()).catch(() => {});
+  }
+
+  async function ensureScrubDecoder(anchorFrame = currentFrame()) {
+    const mediaId = playback.media?.mediaId || playback.currentSrc;
+    if (!mediaId) throw new Error('没有可供拖动的媒体');
+    if (state.scrubDecoder && state.scrubDecoderMediaId === mediaId && state.scrubDecoder.readyState >= 2) return state.scrubDecoder;
+    if (state.scrubDecoderPromise) return state.scrubDecoderPromise;
+    const generation = state.frameCacheGeneration;
+    let decoder;
+    const promise = (async () => {
+      decoder = AstriaPlayback.create(null, { purpose: 'scrub', maxWidth: 960, maxHeight: 540 });
+      decoder.muted = true; decoder.setProjectFps(state.fps);
+      const metadata = waitForMediaEvent(decoder, 'loadedmetadata', 8000);
+      const loaded = waitForMediaEvent(decoder, 'loadeddata', 8000);
+      decoder.open(playback.media);
+      await metadata; await loaded;
+      if (generation !== state.frameCacheGeneration) throw new Error('拖动解码器已过期');
+      state.scrubDecoder = decoder; state.scrubDecoderMediaId = mediaId;
+      const target = clamp(Math.round(anchorFrame), 0, lastFrame());
+      if (target) await decoder.seekFrameExact(target, state.fps);
+      state.scrubDecoderFrame = target;
+      await cacheFrameFromMedia(decoder, target, generation);
+      return decoder;
+    })().catch(async error => {
+      if (generation === state.frameCacheGeneration && (!state.scrubDecoder || state.scrubDecoder === decoder)) {
+        state.scrubDecoder = null; state.scrubDecoderMediaId = null; state.scrubDecoderFrame = null;
+      }
+      if (decoder) await Promise.resolve(decoder.destroy()).catch(() => {});
+      throw error;
+    }).finally(() => { if (state.scrubDecoderPromise === promise) state.scrubDecoderPromise = null; });
+    state.scrubDecoderPromise = promise;
+    return promise;
+  }
+
+  async function positionScrubDecoder(targetFrame, generation = state.frameCacheGeneration) {
+    let decoder;
+    try { decoder = await ensureScrubDecoder(targetFrame); }
+    catch { decoder = playback; state.scrubDecoderFrame = currentFrame(); }
+    if (generation !== state.frameCacheGeneration) return false;
+    const target = clamp(Math.round(targetFrame), 0, lastFrame());
+    const delta = target - state.scrubDecoderFrame;
+    if (delta === 1 || delta === -1) await decoder.stepFrame(Math.sign(delta), state.fps);
+    else if (delta) await decoder.seekFrameExact(target, state.fps);
+    if (generation !== state.frameCacheGeneration || (decoder !== playback && state.scrubDecoder !== decoder)) return false;
+    state.scrubDecoderFrame = target;
+    return cacheFrameFromMedia(decoder, target, generation);
+  }
+
+  function scheduleScrubPrefetch(delay = 600) {
+    clearTimeout(state.scrubPrefetchTimer);
+    if (!playback.duration) return;
+    state.scrubPrefetchTimer = setTimeout(prefetchScrubWindow, delay);
+  }
+
+  async function prefetchScrubWindow() {
+    if (!playback.duration || !playback.paused || state.scrubController.active || state.scrubWorkerBusy || document.hidden) {
+      scheduleScrubPrefetch(900); return;
+    }
+    const generation = state.frameCacheGeneration, anchor = currentFrame();
+    const direction = state.scrubController.direction || 1;
+    const forward = direction > 0 ? 33 : 14, backward = direction > 0 ? 14 : 33;
+    const targets = [];
+    for (let distance = 0; distance <= forward; distance++) targets.push(clamp(anchor + distance * direction, 0, lastFrame()));
+    for (let distance = 1; distance <= backward; distance++) targets.push(clamp(anchor - distance * direction, 0, lastFrame()));
+    state.scrubWorkerBusy = true;
+    const work = (async () => {
+      try {
+        for (const frame of [...new Set(targets)]) {
+          if (generation !== state.frameCacheGeneration || state.scrubController.active || !playback.paused) break;
+          if (state.frameCache.has(frame)) continue;
+          await positionScrubDecoder(frame, generation);
+        }
+      } catch { /* prefetch is optional; active scrub can fall back to the main player */ }
+    })().finally(() => {
+      if (state.scrubWorkerPromise !== work) return;
+      state.scrubWorkerPromise = null; state.scrubWorkerBusy = false;
+      if (generation !== state.frameCacheGeneration) return;
+      if (state.scrubController.active) pumpProfessionalScrub();
+      else scheduleScrubPrefetch(1200);
+    });
+    state.scrubWorkerPromise = work;
+    await work;
+  }
+
   function announceInitialMediaPresented(immediate = false) {
     if (state.initialMediaPresentationSent || !desktopAPI?.initialMediaPresented) return;
     state.initialMediaPresentationSent = true;
@@ -773,7 +897,7 @@
     state.timelinePreviewPending = null;
     cancelAnimationFrame(state.timelinePreviewRaf);
     state.timelinePreviewRaf = null;
-    if (state.timelinePreviewVideo) warmTimelinePreview();
+    if (state.timelinePreviewVideo && !state.scrubController.active) warmTimelinePreview();
   }
 
   function disposeTimelinePreview() {
@@ -867,6 +991,7 @@
 
   function warmTimelinePreview() {
     clearTimeout(state.timelinePreviewWarmTimer);
+    if (state.scrubController.active) return;
     const generation = state.timelinePreviewGeneration;
     state.timelinePreviewWarmTimer = setTimeout(() => {
       if (generation !== state.timelinePreviewGeneration || state.timelinePreviewPending || state.timelinePreviewActive || !state.timelineHoverPreview) return;
@@ -923,7 +1048,7 @@
   }
 
   function renderLoopRange() {
-    const total = Math.max(1, totalFrames());
+    const total = Math.max(1, lastFrame());
     const inSet = Number.isFinite(state.loopInFrame);
     const outSet = Number.isFinite(state.loopOutFrame);
     els.loopInMarker.classList.toggle('show', inSet);
@@ -946,7 +1071,7 @@
     cancelTextAnnotation();
     unlockPixelInspector(true);
     $('#transportSettings').removeAttribute('open');
-    clearFrameCache();
+    resetScrubDecoder(); clearFrameCache();
     disposeTimelinePreview();
     state.annotationUndo = []; state.quickGesture = null;
     state.viewerZoomMode = 'fit'; state.viewerZoom = 1; state.viewerPan = { x: 0, y: 0 };
@@ -958,7 +1083,7 @@
     state.currentObjectUrl = ownedObjectUrl;
     state.sourcePath = media.path || null;
     state.fileName = media.name;
-    state.fileMeta = { name: media.name, size: media.size || 0, type: media.type || 'video/*', modified: media.lastModified || 0, path: media.path || null, mediaId: media.mediaId, mediaKind: media.mediaKind || 'video', sourceFrameOffset: media.sourceFrameOffset || 0, sequence: media.sequence || null };
+    state.fileMeta = { name: media.name, size: media.size || 0, type: media.type || 'video/*', modified: media.lastModified || 0, path: media.path || null, mediaId: media.mediaId, mediaKind: media.mediaKind || 'video', sourceFps: media.sourceFps || null, sourceFrameOffset: media.sourceFrameOffset || 0, sequence: media.sequence || null };
     activateMediaWorkspace(state.fileMeta);
     playback.setProjectFps(state.fps);
     playback.open(media);
@@ -987,6 +1112,14 @@
   }
 
   function onMetadata() {
+    state.fileMeta.sourceFps = Number(playback.media?.sourceFps || playback.media?.fps) || null;
+    if (state.fileMeta.mediaKind === 'video' && state.fpsMode === 'source' && state.fileMeta.sourceFps) {
+      state.fps = state.fileMeta.sourceFps;
+      playback.setProjectFps(state.fps);
+      els.fpsInput.value = Number(state.fps.toFixed(3));
+      $('#hudFps').textContent = `${Number(state.fps.toFixed(3))} FPS`;
+      $('#propFps').textContent = `${Number(state.fps.toFixed(3))} fps`;
+    }
     document.body.classList.remove('media-loading');
     els.viewerStage.classList.add('has-video');
     setMediaReady(true);
@@ -997,7 +1130,7 @@
     $('#propDuration').textContent = formatClock(playback.duration);
     $('#propFrames').textContent = totalFrames().toLocaleString();
     setStatus('视频已就绪');
-    resetViewerView(false); renderTimeline(); updateUI(); startFrameCacheLoop(); captureFrame(); renderCompositionGuides();
+    resetViewerView(false); renderTimeline(); updateUI(); startFrameCacheLoop(); captureFrame(); renderCompositionGuides(); scheduleScrubPrefetch(250);
     if (state.colorPreset !== 'original') scheduleColorRender();
     if (state.timelineHoverPreview) ensureTimelinePreviewVideo();
     saveWorkspace();
@@ -1211,11 +1344,11 @@
     els.ruler.style.width = `${width}%`;
     els.markerLayer.innerHTML = '';
     els.annotationMarkerLayer.innerHTML = '';
-    const duration = playback.duration || 1;
+    const timelineLastFrame = Math.max(1, lastFrame());
     state.bookmarks.forEach(b => {
       const marker = document.createElement('div');
       marker.className = `timeline-marker${state.selectedBookmarkIds.includes(b.id) ? ' active' : ''}`;
-      marker.dataset.id = b.id; marker.style.left = `${clamp(b.timestamp / duration * 100, 0, 100)}%`;
+      marker.dataset.id = b.id; marker.style.left = `${clamp(b.frame / timelineLastFrame * 100, 0, 100)}%`;
       marker.style.setProperty('--marker-color', b.color); marker.title = `${b.title} · Frame ${sourceFrame(b.frame)}`;
       marker.addEventListener('click', e => { e.stopPropagation(); selectBookmark(b.id, e.ctrlKey || e.metaKey); });
       let moving = false;
@@ -1223,9 +1356,9 @@
       marker.addEventListener('pointermove', e => {
         if (!moving) return;
         const rect = els.timelineTrack.getBoundingClientRect();
-        b.timestamp = clamp((e.clientX - rect.left) / rect.width, 0, 1) * duration;
-        b.frame = Math.round(b.timestamp * state.fps); b.timestamp = b.frame / state.fps;
-        marker.style.left = `${b.timestamp / duration * 100}%`; seekFrame(b.frame); renderBookmarks();
+        b.frame = Math.round(clamp((e.clientX - rect.left) / rect.width, 0, 1) * lastFrame());
+        b.timestamp = b.frame / state.fps;
+        marker.style.left = `${b.frame / timelineLastFrame * 100}%`; seekFrame(b.frame); renderBookmarks();
       });
       marker.addEventListener('pointerup', () => { moving = false; saveWorkspace(); });
       els.markerLayer.appendChild(marker);
@@ -1239,7 +1372,7 @@
       const marker = document.createElement('div');
       marker.className = 'annotation-timeline-marker';
       marker.dataset.frame = frame;
-      marker.style.left = `${clamp((frame / state.fps) / duration * 100, 0, 100)}%`;
+      marker.style.left = `${clamp(frame / timelineLastFrame * 100, 0, 100)}%`;
       marker.style.setProperty('--annotation-marker-color', annotations[0].color || state.annotationColor);
       marker.title = `Frame ${sourceFrame(frame)} 有批注 · ${annotations.length} 个内容`;
       marker.addEventListener('pointerdown', e => e.stopPropagation());
@@ -1429,7 +1562,7 @@
     if (!gesture.drawing) {
       gesture.drawing = true; pause();
       if (gesture.tool === 'select') {
-        gesture.scrubStartFrame = currentFrame();
+        gesture.scrubStartFrame = currentFrame(); beginProfessionalScrub();
       } else if (gesture.tool !== 'eraser') {
         const rect = els.canvas.getBoundingClientRect();
         const startEvent = { clientX: gesture.startX, clientY: gesture.startY };
@@ -1441,7 +1574,7 @@
     if (gesture.tool === 'select') {
       const px = e.clientX - gesture.startX;
       const factor = e.altKey ? 1 : (e.shiftKey ? state.viewerScrubSensitivity * .2 : state.viewerScrubSensitivity);
-      queueResponsiveSeek(gesture.scrubStartFrame + px * factor);
+      updateProfessionalScrubTarget(gesture.scrubStartFrame + px * factor);
     } else if (gesture.tool === 'eraser') eraseAnnotationsAt(e.clientX, e.clientY);
     else {
       const p = canvasPoint(e); gesture.annotation.end = p;
@@ -1455,7 +1588,7 @@
     if (!gesture || e.pointerId !== gesture.pointerId) return;
     state.quickGesture = null;
     if (!gesture.drawing) { showAnnotationRadialMenu(e.clientX, e.clientY); return; }
-    if (gesture.tool === 'select') { updateUI(true); return; }
+    if (gesture.tool === 'select') { endProfessionalScrub(); return; }
     if (gesture.tool === 'eraser') {
       if (gesture.erasedCount) { refreshAnnotationUI(); toast(`已擦除 ${gesture.erasedCount} 个批注内容`); }
       else drawAnnotations();
@@ -1627,7 +1760,7 @@
   }
 
   function workspaceData() {
-    return { version: '0.6', mediaKind: state.fileMeta?.mediaKind || 'video', sourceFrameOffset: state.fileMeta?.sourceFrameOffset || 0, sequence: state.fileMeta?.sequence || null, fileMeta: state.fileMeta, fps: state.fps, bookmarks: state.bookmarks, annotations: state.annotations, annotationThumbnails: state.annotationThumbnails, timelineZoom: state.timelineZoom, loopInFrame: state.loopInFrame, loopOutFrame: state.loopOutFrame, colorPreset: state.colorPreset, updatedAt: new Date().toISOString() };
+    return { version: '0.7', mediaKind: state.fileMeta?.mediaKind || 'video', sourceFrameOffset: state.fileMeta?.sourceFrameOffset || 0, sequence: state.fileMeta?.sequence || null, fileMeta: state.fileMeta, fps: state.fps, fpsMode: state.fpsMode, bookmarks: state.bookmarks, annotations: state.annotations, annotationThumbnails: state.annotationThumbnails, timelineZoom: state.timelineZoom, loopInFrame: state.loopInFrame, loopOutFrame: state.loopOutFrame, colorPreset: state.colorPreset, updatedAt: new Date().toISOString() };
   }
 
   function legacyMediaKey(meta) {
@@ -1702,7 +1835,8 @@
         syncDesktopAppData(library);
       }
     }
-    state.fps = Number(saved?.fps) || 24;
+    state.fpsMode = saved ? (saved.fpsMode === 'source' ? 'source' : 'custom') : (meta?.mediaKind === 'video' ? 'source' : 'custom');
+    state.fps = Number(saved?.fps) || Number(meta?.sourceFps || meta?.fps) || 24;
     state.bookmarks = saved?.bookmarks || [];
     state.annotations = saved?.annotations || [];
     state.annotationThumbnails = saved?.annotationThumbnails && typeof saved.annotationThumbnails === 'object' ? saved.annotationThumbnails : {};
@@ -2001,20 +2135,20 @@
   function seekTimelineAt(clientX) {
     if (!playback.duration) return;
     const rect = els.timelineTrack.getBoundingClientRect();
-    const frame = Math.round(clamp((clientX - rect.left) / rect.width, 0, 1) * totalFrames());
+    const frame = Math.round(clamp((clientX - rect.left) / rect.width, 0, 1) * lastFrame());
     if (state.timelineScrub?.lastFrame === frame) return;
     if (state.timelineScrub) state.timelineScrub.lastFrame = frame;
-    queueResponsiveSeek(frame);
+    updateProfessionalScrubTarget(frame);
   }
 
   function updateTimelineTooltip(e) {
-    if (!playback.duration || !state.timelineHoverPreview) {
+    if (!playback.duration || !state.timelineHoverPreview || state.timelineScrub?.dragging || state.scrubController.active) {
       hideTimelinePreview();
       return;
     }
     const trackRect = els.timelineTrack.getBoundingClientRect();
     const ratio = clamp((e.clientX - trackRect.left) / trackRect.width, 0, 1);
-    const frame = clamp(Math.round(ratio * totalFrames()), 0, Math.max(0, Math.ceil(playback.duration * state.fps) - 1));
+    const frame = clamp(Math.round(ratio * lastFrame()), 0, lastFrame());
     // Seek inside the selected frame to avoid decoding the preceding boundary frame.
     const time = Math.min((frame + .25) / state.fps, Math.max(0, playback.duration - .001));
     els.timelineTooltip.dataset.frame = String(frame);
@@ -2031,70 +2165,121 @@
     requestTimelinePreview(time, frame);
   }
 
-  function queueResponsiveSeek(frame) {
-    const targetFrame = clamp(Math.round(frame), 0, totalFrames());
-    state.timelineSeek.pendingFrame = targetFrame;
-    showCachedFrame(targetFrame);
-    updatePlaybackUI(targetFrame / state.fps, targetFrame);
-    pumpResponsiveSeek();
+  function beginProfessionalScrub() {
+    const controller = state.scrubController;
+    if (controller.active || !playback.duration) return;
+    pause(); stopReverse(); clearTimeout(state.scrubPrefetchTimer);
+    const frame = currentFrame();
+    state.scrubInteraction += 1; state.scrubFinalizing = false;
+    Object.assign(controller, { active: true, pointerTargetFrame: frame, targetFrame: frame, presentedFrame: frame, direction: 0, inFlight: false });
+    hideTimelinePreview();
+    if (showCachedFrame(frame, true)) state.scrubDisplayFrame = frame;
+    ensureScrubDecoder(frame).then(() => pumpProfessionalScrub()).catch(() => pumpProfessionalScrub());
   }
 
-  function pumpResponsiveSeek() {
-    const controller = state.timelineSeek;
-    if (controller.inFlight || controller.pendingFrame === null || !playback.duration) return;
-    const frame = controller.pendingFrame;
-    controller.pendingFrame = null;
-    const targetTime = frame / state.fps;
-    if (Math.abs(playback.currentTime - targetTime) < frameDuration() * .2) {
-      if (controller.pendingFrame !== null) pumpResponsiveSeek();
-      else if (!state.timelineScrub && !state.scrub) updateUI(true);
-      return;
-    }
-    controller.inFlight = true;
-    playback.currentTime = targetTime;
+  function updateProfessionalScrubTarget(frame) {
+    const controller = state.scrubController;
+    if (!controller.active) beginProfessionalScrub();
+    const requested = clamp(Math.round(frame), 0, lastFrame());
+    controller.pointerTargetFrame = requested;
+    const presented = controller.presentedFrame ?? currentFrame();
+    controller.targetFrame = clamp(requested, Math.max(0, presented - 4), Math.min(lastFrame(), presented + 4));
+    pumpProfessionalScrub();
   }
 
-  function onResponsiveSeeked() {
-    const controller = state.timelineSeek;
-    hideCachedFrame(); captureFrame(); scheduleColorRender();
-    if (state.annotations.some(annotation => annotation.frame === currentFrame()) && !state.annotationThumbnails[currentFrame()]) {
-      updateAnnotationThumbnail(currentFrame()); renderAnnotationList(); saveWorkspace();
+  function presentProfessionalScrubFrame(frame) {
+    if (!showCachedFrame(frame, true)) return false;
+    state.scrubDisplayFrame = frame;
+    state.scrubController.presentedFrame = frame;
+    window.__astriaScrubTest?.trace.push(frame);
+    updatePlaybackUI(frame / state.fps, frame);
+    updateFrameContent(true);
+    return true;
+  }
+
+  function pumpProfessionalScrub() {
+    const controller = state.scrubController;
+    if (!controller.active || controller.inFlight || state.scrubWorkerBusy || !playback.duration) return;
+    const presented = controller.presentedFrame ?? currentFrame();
+    const pointer = controller.pointerTargetFrame ?? presented;
+    controller.targetFrame = clamp(pointer, Math.max(0, presented - 4), Math.min(lastFrame(), presented + 4));
+    if (controller.targetFrame === presented) return;
+    const direction = Math.sign(controller.targetFrame - presented), nextFrame = presented + direction;
+    controller.direction = direction; controller.inFlight = true;
+    const interaction = state.scrubInteraction, generation = state.frameCacheGeneration;
+    state.scrubWorkerBusy = true;
+    const work = (async () => {
+      if (!state.frameCache.has(nextFrame)) {
+        try { await positionScrubDecoder(nextFrame, generation); }
+        catch {
+          if (interaction !== state.scrubInteraction || generation !== state.frameCacheGeneration || !controller.active) return;
+          await playback.seekFrameExact(nextFrame, state.fps);
+          if (interaction !== state.scrubInteraction || generation !== state.frameCacheGeneration || !controller.active) return;
+          state.scrubDecoderFrame = nextFrame;
+          await cacheFrameFromMedia(playback, nextFrame, generation);
+        }
+      }
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const latestPresented = controller.presentedFrame ?? currentFrame();
+      const latestDirection = Math.sign((controller.pointerTargetFrame ?? latestPresented) - latestPresented);
+      if (interaction === state.scrubInteraction && generation === state.frameCacheGeneration && controller.active &&
+          latestPresented === presented && latestDirection === direction) presentProfessionalScrubFrame(nextFrame);
+    })().catch(() => {
+      if (interaction === state.scrubInteraction && controller.active) setStatus('逐帧预览暂时不可用');
+    }).finally(() => {
+      if (interaction === state.scrubInteraction) controller.inFlight = false;
+      if (state.scrubWorkerPromise === work) { state.scrubWorkerPromise = null; state.scrubWorkerBusy = false; }
+      if (interaction === state.scrubInteraction && controller.active) pumpProfessionalScrub();
+    });
+    state.scrubWorkerPromise = work;
+  }
+
+  async function endProfessionalScrub() {
+    const controller = state.scrubController;
+    if (!controller.active) return;
+    const finalFrame = controller.presentedFrame ?? currentFrame();
+    controller.active = false; controller.pointerTargetFrame = null; controller.targetFrame = finalFrame; controller.inFlight = false;
+    const interaction = ++state.scrubInteraction;
+    state.scrubFinalizing = true; state.scrubDisplayFrame = finalFrame;
+    showCachedFrame(finalFrame, true); updatePlaybackUI(finalFrame / state.fps, finalFrame); updateFrameContent(true);
+    const pending = state.scrubWorkerPromise;
+    if (pending) await pending.catch(() => {});
+    if (interaction !== state.scrubInteraction) return;
+    try {
+      playback.pause();
+      await playback.seekFrameExact(finalFrame, state.fps);
+      if (interaction !== state.scrubInteraction) return;
+      state.scrubDisplayFrame = null; hideCachedFrame(); captureFrame(finalFrame); updateUI(true);
+    } catch { if (interaction === state.scrubInteraction) setStatus('精确帧定位失败'); }
+    finally {
+      if (interaction === state.scrubInteraction) { state.scrubFinalizing = false; scheduleScrubPrefetch(); }
     }
+  }
+
+  function onPlaybackSeeked() {
+    if (state.scrubController.active || state.scrubFinalizing) return;
+    state.scrubDisplayFrame = null; hideCachedFrame(); captureFrame(); scheduleColorRender(); updateUI(true);
     if (state.reverseSeekInFlight) {
       state.reverseSeekInFlight = false;
-      updateUI(true);
-      if (!hasLoopRange() && currentFrame() <= 0) {
-        stopReverse();
-        setStatus('已到第一帧');
-      } else if (state.isReverse) state.reverseTimer = requestAnimationFrame(pumpReversePlayback);
-      return;
+      if (!hasLoopRange() && currentFrame() <= 0) { stopReverse(); setStatus('已到第一帧'); }
+      else if (state.isReverse) state.reverseTimer = requestAnimationFrame(pumpReversePlayback);
     }
-    if (!controller.inFlight) { updateUI(true); return; }
-    controller.inFlight = false;
-    if (controller.pendingFrame !== null) {
-      state.lastFrameContent = currentFrame();
-      drawAnnotations();
-      pumpResponsiveSeek();
-    }
-    else updateUI(true);
   }
 
   function beginTimelineScrub(e) {
     if (!playback.duration || e.button !== 0 || e.target.closest('.timeline-marker, .annotation-timeline-marker')) return;
     e.preventDefault();
-    const wasPlaying = !playback.paused && !state.isReverse;
-    const wasReverse = state.isReverse;
-    pause();
-    state.timelineScrub = { pointerId: e.pointerId, lastFrame: null, wasPlaying, wasReverse };
+    state.timelineScrub = { pointerId: e.pointerId, startX: e.clientX, lastFrame: null, dragging: false };
     e.currentTarget.setPointerCapture(e.pointerId);
     els.timelineWrap.classList.add('scrubbing');
     els.ruler.classList.add('scrubbing');
-    seekTimelineAt(e.clientX);
   }
 
   function moveTimelineScrub(e) {
     if (!state.timelineScrub || e.pointerId !== state.timelineScrub.pointerId) return;
     e.preventDefault();
+    if (!state.timelineScrub.dragging && Math.abs(e.clientX - state.timelineScrub.startX) < 4) return;
+    if (!state.timelineScrub.dragging) { state.timelineScrub.dragging = true; beginProfessionalScrub(); }
     seekTimelineAt(e.clientX);
   }
 
@@ -2102,12 +2287,14 @@
     if (!state.timelineScrub || e.pointerId !== state.timelineScrub.pointerId) return;
     hideTimelinePreview();
     const scrub = state.timelineScrub;
-    seekTimelineAt(e.clientX);
     state.timelineScrub = null;
     els.timelineWrap.classList.remove('scrubbing');
     els.ruler.classList.remove('scrubbing');
-    if (scrub.wasReverse) reverse();
-    else if (scrub.wasPlaying) play();
+    if (scrub.dragging) endProfessionalScrub();
+    else {
+      const rect = els.timelineTrack.getBoundingClientRect();
+      seekFrame(Math.round(clamp((e.clientX - rect.left) / rect.width, 0, 1) * lastFrame()));
+    }
   }
 
   function cancelTimelineScrub(pointerId) {
@@ -2117,8 +2304,7 @@
     state.timelineScrub = null;
     els.timelineWrap.classList.remove('scrubbing');
     els.ruler.classList.remove('scrubbing');
-    if (scrub.wasReverse) reverse();
-    else if (scrub.wasPlaying) play();
+    if (scrub.dragging) endProfessionalScrub();
   }
 
   function beginScrub(e) {
@@ -2130,7 +2316,7 @@
     }
     if (e.target.closest('.clean-window-controls')) return;
     if (!playback.duration || e.button !== 0) return;
-    state.scrub={pointerId:e.pointerId,startX:e.clientX,startY:e.clientY,startFrame:currentFrame(),lastFrame:currentFrame(),dragging:false,wasPlaying:!playback.paused && !state.isReverse,wasReverse:state.isReverse};
+    state.scrub={pointerId:e.pointerId,startX:e.clientX,startY:e.clientY,startFrame:currentFrame(),lastFrame:currentFrame(),dragging:false};
     els.viewerStage.setPointerCapture(e.pointerId);
   }
 
@@ -2139,21 +2325,20 @@
     const px=e.clientX-state.scrub.startX;
     const movement=Math.hypot(px,e.clientY-state.scrub.startY);
     if(!state.scrub.dragging&&movement<4)return;
-    if(!state.scrub.dragging){state.scrub.dragging=true;pause();els.viewerStage.classList.add('scrubbing-viewer');}
+    if(!state.scrub.dragging){state.scrub.dragging=true;beginProfessionalScrub();els.viewerStage.classList.add('scrubbing-viewer');}
     e.preventDefault();
     const factor=e.altKey?1:(e.shiftKey?state.viewerScrubSensitivity*.2:state.viewerScrubSensitivity);
     const next=Math.round(state.scrub.startFrame+px*factor);
-    state.scrub.lastFrame=clamp(next,0,totalFrames()); queueResponsiveSeek(state.scrub.lastFrame);
+    state.scrub.lastFrame=clamp(next,0,lastFrame()); updateProfessionalScrubTarget(state.scrub.lastFrame);
   }
 
   function endScrub(e) {
     if (!state.scrub || (e?.pointerId !== undefined && e.pointerId !== state.scrub.pointerId)) return;
-    const { dragging: wasDragging, wasPlaying, wasReverse } = state.scrub;
+    const { dragging: wasDragging } = state.scrub;
     state.scrub=null;
     els.viewerStage.classList.remove('scrubbing-viewer');
     if (wasDragging) {
-      if (wasReverse) reverse();
-      else if (wasPlaying) play();
+      endProfessionalScrub();
     } else if (e?.type !== 'pointercancel') {
       playback.paused&&!state.isReverse?play():pause();
       scheduleCleanControlsHide();
@@ -2282,7 +2467,7 @@
 
   function collectContactCandidates() {
     const candidates=new Map();
-    const add=(frame,kind,label)=>{frame=clamp(Math.round(frame),0,totalFrames());const current=candidates.get(frame);if(current){if(!current.kinds.includes(kind))current.kinds.push(kind);if(label&&!current.labels.includes(label))current.labels.push(label);}else candidates.set(frame,{frame,kinds:[kind],labels:label?[label]:[],selected:true});};
+    const add=(frame,kind,label)=>{frame=clamp(Math.round(frame),0,lastFrame());const current=candidates.get(frame);if(current){if(!current.kinds.includes(kind))current.kinds.push(kind);if(label&&!current.labels.includes(label))current.labels.push(label);}else candidates.set(frame,{frame,kinds:[kind],labels:label?[label]:[],selected:true});};
     if($('#contactBookmarks').checked)state.bookmarks.forEach(bookmark=>add(bookmark.frame,'书签',bookmark.title||'书签'));
     if($('#contactAnnotations').checked){const frames=[...new Set(state.annotations.map(annotation=>annotation.frame))];frames.forEach(frame=>{const types=[...new Set(state.annotations.filter(a=>a.frame===frame).map(a=>annotationName(a.type)))];add(frame,'批注',types.slice(0,3).join('、')||'批注');});}
     if($('#contactLoop').checked){if(hasLoopRange()){const count=clamp(Number($('#contactSampleCount').value)||12,4,24);for(let index=0;index<count;index++)add(state.loopInFrame+(state.loopOutFrame-state.loopInFrame)*(count===1?0:index/(count-1)),'I/O','均匀取样');}}
@@ -2346,8 +2531,8 @@
     playback.addEventListener('metadata',onMetadata);
     playback.addEventListener('frame',announceInitialMediaPresented,{once:true});
     playback.addEventListener('error',()=>{document.body.classList.remove('media-loading');announceInitialMediaPresented(true);setMediaReady(false);setStatus('视频载入失败');toast(playback.error?.message || '无法播放此视频，请检查编码格式');});
-    playback.addEventListener('frame',()=>{if(!state.timelineScrub&&!state.scrub&&!state.timelineSeek.inFlight)updateUI();if(!playback.requestVideoFrameCallback){captureFrame();scheduleColorRender();}});
-    playback.addEventListener('frame',event=>{if(event.detail?.seeked)onResponsiveSeeked();});
+    playback.addEventListener('frame',()=>{if(!state.timelineScrub&&!state.scrub&&!state.scrubController.active&&!state.scrubFinalizing)updateUI();if(!playback.requestVideoFrameCallback){captureFrame();scheduleColorRender();}});
+    playback.addEventListener('frame',event=>{if(event.detail?.seeked)onPlaybackSeeked();});
     playback.addEventListener('playing',()=>{hideCachedFrame();els.playBtn.classList.add('playing');setStatus('播放中');startPlaybackUiLoop();revealCleanControls();});
     playback.addEventListener('paused',()=>{els.playBtn.classList.remove('playing');stopPlaybackUiLoop();if(!state.isReverse)setStatus('已暂停');revealCleanControls();});
     playback.addEventListener('ended',handlePlaybackEnded);
@@ -2374,7 +2559,7 @@
       toast(`下次启动默认使用${state.startupMode === 'clean' ? '纯净模式' : '经典模式'}`);
     });
     els.endBehaviorSelect.addEventListener('change',e=>{state.endBehavior=e.target.value;persistPreferences();toast(({stop:'播放结束后停在最后一帧',rewind:'播放结束后返回第一帧',loop:'已开启循环播放'})[state.endBehavior]);});
-    els.fpsInput.addEventListener('change',()=>{state.fps=clamp(Number(els.fpsInput.value)||24,1,240);playback.setProjectFps(state.fps);clearFrameCache();disposeTimelinePreview();state.bookmarks.forEach(b=>b.timestamp=b.frame/state.fps);els.fpsInput.value=state.fps;$('#hudFps').textContent=`${state.fps} FPS`;$('#propFps').textContent=`${state.fps} fps`;$('#propFrames').textContent=totalFrames().toLocaleString();renderBookmarks();renderTimeline();saveWorkspace();});
+    els.fpsInput.addEventListener('change',()=>{state.fps=clamp(Number(els.fpsInput.value)||24,1,240);state.fpsMode='custom';playback.setProjectFps(state.fps);resetScrubDecoder();clearFrameCache();disposeTimelinePreview();state.bookmarks.forEach(b=>b.timestamp=b.frame/state.fps);els.fpsInput.value=state.fps;$('#hudFps').textContent=`${state.fps} FPS`;$('#propFps').textContent=`${state.fps} fps`;$('#propFrames').textContent=totalFrames().toLocaleString();renderBookmarks();renderTimeline();scheduleScrubPrefetch();saveWorkspace();});
     els.muteBtn.addEventListener('click',()=>{
       if (playback.muted || playback.volume === 0) {
         if (playback.volume === 0) playback.volume = state.previousVolume || 1;
@@ -2677,5 +2862,14 @@
 
   await loadWorkspace(); void preloadBuiltInColorLuts(); bindEvents(); setMediaReady(false); renderBookmarks(); renderAnnotationList(); syncNotes(); updateUI();
   await initializeDesktopRuntime();
-  if (window.__astriaPlayback) window.__astriaReady = true;
+  if (window.__astriaPlayback) {
+    window.__astriaScrubTest = {
+      trace: [],
+      begin: beginProfessionalScrub,
+      target: updateProfessionalScrubTarget,
+      end: endProfessionalScrub,
+      snapshot: () => ({ ...state.scrubController, fps: state.fps, fpsMode: state.fpsMode, displayFrame: state.scrubDisplayFrame, lastFrame: lastFrame() })
+    };
+    window.__astriaReady = true;
+  }
 })();

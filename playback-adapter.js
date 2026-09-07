@@ -4,7 +4,7 @@
     emit(type, detail) { this.dispatchEvent(new CustomEvent(type, { detail })); }
     get currentFrameCanvas() { return this.surface; }
     async captureFrame() {
-      const canvas = document.createElement('canvas'); canvas.width = this.videoWidth; canvas.height = this.videoHeight;
+      const canvas = document.createElement('canvas'); canvas.width = this.surface.width || this.videoWidth; canvas.height = this.surface.height || this.videoHeight;
       canvas.getContext('2d').drawImage(this.surface, 0, 0); return canvas;
     }
     setProjectFps(fps) { this.projectFps = fps; }
@@ -30,6 +30,22 @@
     pause() { this.stopReverse(); this.element.pause(); }
     seek(time) { this.element.currentTime = time; }
     step(direction) { this.pause(); this.seek(Math.max(0, Math.min(this.duration, this.currentTime + direction / this.projectFps))); }
+    seekFrameExact(frame, fps = this.projectFps) { return this.frameOperation(frame / fps); }
+    stepFrame(direction, fps = this.projectFps) { return this.frameOperation(Math.max(0, Math.min(this.duration, this.currentTime + direction / fps))); }
+    frameOperation(time) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { cleanup(); reject(new Error('逐帧操作超时')); }, 5000);
+        const done = () => { cleanup(); resolve({ time: this.currentTime }); };
+        const failed = () => { cleanup(); reject(new Error('逐帧解码失败')); };
+        const cleanup = () => { clearTimeout(timer); this.element.removeEventListener('seeked', done); this.element.removeEventListener('error', failed); };
+        this.element.addEventListener('seeked', done, { once: true }); this.element.addEventListener('error', failed, { once: true });
+        if (this.element.readyState >= 2 && Math.abs(this.currentTime - time) < .0005) {
+          requestAnimationFrame(() => { cleanup(); resolve({ time: this.currentTime, direction: 0 }); });
+          return;
+        }
+        this.element.currentTime = time;
+      });
+    }
     setSpeed(value) { this.element.playbackRate = value; }
     setVolume(value) { this.element.volume = value; }
     setMuted(value) { this.element.muted = value; }
@@ -42,16 +58,16 @@
   }
 
   class LibmpvAdapter extends PlaybackAdapter {
-    constructor(element) {
-      super(); this.api = window.desktopAPI.media; this.surface = document.createElement('canvas');
+    constructor(element, options = {}) {
+      super(); this.api = window.desktopAPI.media; this.options = options; this.surface = document.createElement('canvas');
       if (element) { this.surface.id = element.id; this.surface.className = element.className; element.replaceWith(this.surface); }
       this.context = this.surface.getContext('2d', { alpha: false });
       this.videoWidth = 0; this.videoHeight = 0; this.duration = 0; this.readyState = 0; this.paused = true; this.seeking = false;
       this.time = 0; this.projectFps = 24; this._volume = 1; this._muted = false; this._speed = 1; this.callbacks = new Map(); this.nextCallback = 0;
-      this.generation = 0; this.disposers = []; this.session = null;
+      this.generation = 0; this.disposers = []; this.session = null; this.operationSequence = 0; this.operations = new Map();
     }
     async ensureSession() {
-      if (!this.session) this.session = this.api.create().then(id => {
+      if (!this.session) this.session = this.api.create(this.options).then(id => {
         this.id = id;
         this.disposers.push(this.api.onState(event => { if (event.id === id) this.onState(event); }),
           this.api.onFrame(frame => { if (frame.id === id) this.drawSoftware(frame); }),
@@ -60,7 +76,13 @@
       });
       return this.session;
     }
-    fail(error) { this.error = error; this.emit('error', { message: error.message || String(error) }); }
+    fail(error) {
+      this.error = error;
+      this.seeking = false;
+      for (const operation of this.operations.values()) { clearTimeout(operation.timer); operation.reject(error); }
+      this.operations.clear();
+      this.emit('error', { message: error.message || String(error) });
+    }
     call(command, ...args) { return this.ensureSession().then(id => this.api[command](id, ...args)).catch(error => { this.fail(error); throw error; }); }
     fire(command, ...args) { this.call(command, ...args).catch(() => {}); }
     async open(media) {
@@ -82,6 +104,10 @@
         if (first) this.emit('loadeddata');
         this.emit('timeupdate'); this.emit('frame', event);
         if (event.seeked) { this.seeking = false; this.emit('seeked'); }
+        if (Number.isSafeInteger(event.operationId)) {
+          const operation = this.operations.get(event.operationId);
+          if (operation) { clearTimeout(operation.timer); this.operations.delete(event.operationId); operation.resolve(event); }
+        }
         const callbacks = [...this.callbacks.values()]; this.callbacks.clear();
         for (const callback of callbacks) callback(performance.now(), { mediaTime: this.time });
       } else if (event.type === 'playing' || event.type === 'paused') {
@@ -100,6 +126,22 @@
     pause() { this.stopReverse(); if (this.session) this.fire('pause'); }
     seek(time) { this.seeking = true; this.fire('seek', time); }
     step(direction) { this.pause(); this.seeking = true; this.fire('step', direction); }
+    seekFrameExact(frame, fps = this.projectFps) { return this.frameOperation('seek', frame / fps); }
+    stepFrame(direction) { return this.frameOperation('step', direction); }
+    async frameOperation(command, value) {
+      const id = await this.ensureSession();
+      const operationId = ++this.operationSequence;
+      this.seeking = true;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { this.operations.delete(operationId); this.seeking = false; reject(new Error('逐帧操作超时')); }, 5000);
+        this.operations.set(operationId, { resolve, reject, timer });
+        this.api[command](id, value, operationId).catch(error => {
+          const operation = this.operations.get(operationId);
+          if (!operation) return;
+          clearTimeout(operation.timer); this.operations.delete(operationId); operation.reject(error); this.fail(error);
+        });
+      });
+    }
     setSpeed(value) { this._speed = value; if (this.session) this.fire('setSpeed', value); }
     setVolume(value) { this._volume = value; if (this.session) this.fire('setVolume', value); }
     setMuted(value) { this._muted = value; if (this.session) this.fire('setMuted', value); }
@@ -123,7 +165,16 @@
       if (!result.currentCanvas) this.drawSoftware(result);
       return super.captureFrame();
     }
-    async destroy() { this.stopReverse(); for (const dispose of this.disposers) dispose(); this.callbacks.clear(); if (this.session) await this.api.destroy(await this.session); this.upload?.destroy(); }
+    async destroy() {
+      if (this.destroyPromise) return this.destroyPromise;
+      this.destroyPromise = (async () => {
+        this.stopReverse(); for (const dispose of this.disposers) dispose(); this.callbacks.clear();
+        const error = new Error('媒体会话已关闭');
+        for (const operation of this.operations.values()) { clearTimeout(operation.timer); operation.reject(error); }
+        this.operations.clear(); if (this.session) await this.api.destroy(await this.session); this.upload?.destroy();
+      })();
+      return this.destroyPromise;
+    }
   }
   class SoftwareFrameUpload {
     constructor() {
@@ -145,5 +196,5 @@
     }
     destroy() { this.gl.deleteTexture(this.texture); this.gl.deleteProgram(this.program); }
   }
-  window.AstriaPlayback = Object.freeze({ create: element => window.desktopAPI ? new LibmpvAdapter(element) : new HTMLVideoAdapter(element), PlaybackAdapter, HTMLVideoAdapter, LibmpvAdapter });
+  window.AstriaPlayback = Object.freeze({ create: (element, options) => window.desktopAPI ? new LibmpvAdapter(element, options) : new HTMLVideoAdapter(element), PlaybackAdapter, HTMLVideoAdapter, LibmpvAdapter });
 })();

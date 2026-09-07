@@ -32,7 +32,7 @@ class MediaCatalog {
     const name = path.basename(resolved), extension = path.extname(name).slice(1).toLowerCase();
     const descriptor = { path: resolved, url: pathToFileURL(resolved).href, name, displayName: name,
       size: stat.size, lastModified: stat.mtimeMs, mediaKind: 'video', sourceFrameOffset: 0,
-      width: 0, height: 0, duration: 0, fps: 24, totalFrames: 0, missingFrames: [], type: 'video/*' };
+      width: 0, height: 0, duration: 0, fps: 24, sourceFps: null, totalFrames: 0, missingFrames: [], type: 'video/*' };
     let files = null;
     if (formats.image.includes(extension)) {
       const match = /^(.*?)(\d+)(\.[^.]+)$/.exec(name);
@@ -61,7 +61,7 @@ class MediaCatalog {
         if (/[\r\n]/.test(previous) || Buffer.byteLength(previous, 'utf8') > 500) throw new Error('序列文件名过长或包含换行');
         files.push(previous);
       }
-      Object.assign(descriptor, { mediaKind: 'sequence', sourceFrameOffset: first, totalFrames: files.length,
+      Object.assign(descriptor, { mediaKind: 'sequence', sourceFps: 24, sourceFrameOffset: first, totalFrames: files.length,
         duration: files.length / 24, sequence, type: `image/${extension}` });
       descriptor.mediaId = 'sequence:' + createHash('sha256').update(JSON.stringify(sequence)).digest('hex');
     } else {
