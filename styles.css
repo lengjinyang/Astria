@@ -2647,6 +2647,49 @@ body.media-ready.desktop-runtime:not(.clean-mode) .topbar {
   isolation: isolate; background: var(--ambient-chrome-base); border-bottom-color: transparent; box-shadow: none;
   backdrop-filter: none; -webkit-backdrop-filter: none;
 }
+
+/* Floating inspector: opening analysis no longer resizes the picture viewport. */
+body:not(.clean-mode) .workspace,
+body:not(.clean-mode).panel-collapsed .workspace { grid-template-columns: minmax(0,1fr); }
+body:not(.clean-mode) .analysis-panel {
+  position: absolute; right: 12px; bottom: 52px; z-index: 34;
+  width: min(360px,calc(100% - 24px)); height: min(620px,calc(100% - 68px)); margin: 0;
+  overflow: hidden; border: 1px solid rgba(255,255,255,.075); border-radius: 10px;
+  background: var(--chrome-popover); box-shadow: 0 10px 34px rgba(0,0,0,.36);
+  -webkit-backdrop-filter: blur(32px) saturate(1.15); backdrop-filter: blur(32px) saturate(1.15);
+  transform-origin: right bottom;
+  transition: opacity .15s ease, translate .15s ease, scale .15s ease;
+}
+body.media-ready.ambient-lit:not(.clean-mode) .analysis-panel { background: var(--chrome-popover); }
+body:not(.clean-mode).panel-collapsed .analysis-panel {
+  opacity: 0; translate: 0 8px; scale: .98; pointer-events: none;
+}
+
+/* Compact vertical volume popover. */
+.volume-disclosure .volume-control {
+  right: 50%; bottom: calc(100% + 8px); translate: 50% 0;
+  width: 48px; height: 172px; padding: 8px 6px; flex-direction: column; justify-content: center; gap: 5px;
+}
+body.media-ready .volume-disclosure .volume-control input {
+  display: block; width: 22px; height: 104px; margin: 0;
+  writing-mode: vertical-lr; direction: rtl;
+}
+.volume-disclosure .volume-control input::-webkit-slider-runnable-track { width: 2px; height: 100%; }
+.volume-disclosure .volume-control input::-webkit-slider-thumb { margin: 0 0 0 -3px; }
+body.media-ready .volume-disclosure .volume-control output { display: block; width: 36px; text-align: center; }
+
+/* Pure viewing mode keeps its speaker button and reveals the same vertical control above it. */
+body.media-ready.clean-mode .transport .clean-volume { gap: 0; }
+body.media-ready.clean-mode .clean-volume input {
+  position: absolute; left: 2px; bottom: 34px; z-index: 46;
+  display: block; width: 22px; height: 112px; padding: 8px 5px;
+  writing-mode: vertical-lr; direction: rtl;
+  border: 1px solid rgba(255,255,255,.075); border-radius: 8px;
+  background: var(--chrome-popover); box-shadow: 0 6px 18px #0004;
+  opacity: 0; translate: 0 5px; pointer-events: none;
+  transition: opacity .14s ease,translate .14s ease;
+}
+body.media-ready.clean-mode .clean-volume:is(:hover,:focus-within) input { opacity: 1; translate: 0; pointer-events: auto; }
 body.media-ready:not(.clean-mode) .topbar-ambient {
   display: block; position: absolute; inset: 0; overflow: hidden;
   z-index: -1; pointer-events: none; border-radius: inherit;

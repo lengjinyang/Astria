@@ -1433,7 +1433,6 @@
   }
 
   function setPanelOpen(open) {
-    const changed = state.panelOpen !== !!open;
     state.panelOpen = !!open;
     document.body.classList.toggle('panel-collapsed', !state.panelOpen);
     const toggle = $('#togglePanelBtn');
@@ -1441,8 +1440,9 @@
     toggle.setAttribute('aria-pressed', String(state.panelOpen));
     toggle.setAttribute('aria-label', state.panelOpen ? '隐藏分析面板' : '显示分析面板');
     toggle.title = `${state.panelOpen ? '隐藏' : '显示'}分析面板 (F2)`;
-    if (changed) {
-      fitVideoWindowToMedia(false); scheduleLayoutRefresh();
+    if (state.panelOpen) {
+      $('#transportSettings')?.removeAttribute('open');
+      $('#volumeDisclosure')?.removeAttribute('open');
     }
   }
 
@@ -2609,8 +2609,8 @@
     $('#cleanModeExitBtn').addEventListener('click',()=>setCleanMode(false));
     const volumeDisclosure = $('#volumeDisclosure');
     const transportSettings = $('#transportSettings');
-    transportSettings.addEventListener('toggle', () => { if (transportSettings.open) volumeDisclosure.open = false; });
-    volumeDisclosure.addEventListener('toggle', () => { if (volumeDisclosure.open) transportSettings.open = false; });
+    transportSettings.addEventListener('toggle', () => { if (transportSettings.open) { volumeDisclosure.open = false; setPanelOpen(false); } });
+    volumeDisclosure.addEventListener('toggle', () => { if (volumeDisclosure.open) { transportSettings.open = false; setPanelOpen(false); } });
     $('#lumaBtn').addEventListener('click',()=>{state.lumaMode=!state.lumaMode;els.viewerStage.classList.toggle('luma-mode',state.lumaMode);$('#lumaBtn').classList.toggle('active',state.lumaMode);$('#lumaControl').classList.toggle('active',state.lumaMode);scheduleColorRender();toast(state.lumaMode?'明暗检查已开启':'明暗检查已关闭');saveWorkspace();});
     els.lumaContrast.addEventListener('input',e=>{state.lumaContrast=Number(e.target.value)/100;els.lumaContrastValue.textContent=`${e.target.value}%`;els.viewerStage.style.setProperty('--luma-contrast',state.lumaContrast);scheduleColorRender();});
     els.lumaContrast.addEventListener('change',()=>saveWorkspace());
@@ -2623,12 +2623,16 @@
     $('#guideOpacity').addEventListener('input',event=>{state.guideOpacity=Number(event.target.value)/100;renderCompositionGuides();});$('#guideOpacity').addEventListener('change',persistPreferences);
     $('#guideMaskStrength').addEventListener('input',event=>{state.guideMaskStrength=Number(event.target.value)/100;renderCompositionGuides();});$('#guideMaskStrength').addEventListener('change',persistPreferences);
 
-    document.addEventListener('pointerdown',event=>{if(!event.target.closest('#volumeDisclosure'))volumeDisclosure.open=false;});
+    document.addEventListener('pointerdown',event=>{
+      if(!event.target.closest('#volumeDisclosure'))volumeDisclosure.open=false;
+      if(state.panelOpen&&!event.target.closest('.analysis-panel,#togglePanelBtn'))setPanelOpen(false);
+    });
     document.addEventListener('keydown',event=>{
-      if(event.key!=='Escape'||(!transportSettings.open&&!volumeDisclosure.open))return;
+      if(event.key!=='Escape'||(!transportSettings.open&&!volumeDisclosure.open&&!state.panelOpen))return;
       event.preventDefault();event.stopImmediatePropagation();
       if(transportSettings.open){transportSettings.open=false;$('#transportSettings > summary').focus();}
-      else{volumeDisclosure.open=false;$('#volumeDisclosure > summary').focus();}
+      else if(volumeDisclosure.open){volumeDisclosure.open=false;$('#volumeDisclosure > summary').focus();}
+      else{setPanelOpen(false);$('#togglePanelBtn').focus();}
     },true);
     [['guideThirds','guideThirds'],['guideGolden','guideGolden'],['guideSpiral','guideSpiral'],['guideCenter','guideCenter'],['guideDiagonal','guideDiagonal'],['guideTriangle','guideTriangle'],['guideSymmetry','guideSymmetry'],['guideActionSafe','guideActionSafe'],['guideTitleSafe','guideTitleSafe']].forEach(([id,key])=>$('#'+id).addEventListener('change',event=>{state[key]=event.target.checked;state.guidesMaster=true;renderCompositionGuides();persistPreferences();}));
     $('#hoverPreviewSwitch').addEventListener('click',()=>{state.timelineHoverPreview=!state.timelineHoverPreview;$('#hoverPreviewSwitch').classList.toggle('on',state.timelineHoverPreview);$('#hoverPreviewSwitch').setAttribute('aria-checked',String(state.timelineHoverPreview));if(!state.timelineHoverPreview)disposeTimelinePreview();else if(playback.duration)ensureTimelinePreviewVideo();persistPreferences();toast(state.timelineHoverPreview?'悬停帧预览已开启':'悬停帧预览已关闭');});
