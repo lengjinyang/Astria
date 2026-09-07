@@ -25,7 +25,6 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -87,6 +86,32 @@ std::string hex_u32(unsigned long value) {
   out << "0x" << std::hex << value;
   return out.str();
 }
+
+struct SharedTextureResult {
+  bool busy = false;
+  int slot_id = -1;
+  int width = 0;
+  int height = 0;
+  uintptr_t nt_handle = 0;
+  int64_t timestamp = 0;
+};
+
+class MpvPlayer;
+
+class SharedTextureWorker final : public Napi::AsyncWorker {
+ public:
+  SharedTextureWorker(MpvPlayer* player, Napi::Promise::Deferred deferred, int width, int height);
+  void Execute() override;
+  void OnOK() override;
+  void OnError(const Napi::Error& error) override;
+
+ private:
+  MpvPlayer* player_;
+  Napi::Promise::Deferred deferred_;
+  int width_;
+  int height_;
+  SharedTextureResult result_;
+};
 #endif
 
 using MpvWakeupCallback = void (*)(void*);
@@ -126,6 +151,9 @@ void set_mpv_render_update_callback(mpv_render_context* context, MpvWakeupCallba
 
 class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
  public:
+#ifdef _WIN32
+  friend class SharedTextureWorker;
+#endif
   static Napi::Object Init(Napi::Env env, Napi::Object exports) {
     Napi::Function ctor = DefineClass(env, "MpvPlayer", {
       InstanceMethod("open", &MpvPlayer::Open),
@@ -263,6 +291,9 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
         return;
       }
       set_mpv_render_update_callback(render_context_, on_mpv_render_update, this);
+      // Rendering is dispatched to a worker thread. A WGL context can move
+      // between threads only after it is released by the creating thread.
+      wglMakeCurrent(nullptr, nullptr);
 #else
       Napi::Error::New(env, "shared-texture mode is only implemented on macOS and Windows").ThrowAsJavaScriptException();
       return;
@@ -626,106 +657,9 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
     }
     width = std::min(width, 16384);
     height = std::min(height, 16384);
-
-    int slot_id = acquire_dx_export_slot();
-    if (slot_id < 0) {
-      Napi::Object busy = Napi::Object::New(env);
-      busy.Set("busy", true);
-      return busy;
-    }
-
-    if (!ensure_dx_shared_target(width, height) ||
-        !ensure_dx_export_slot(slot_id, width, height)) {
-      Napi::Error::New(env, dx_error_.empty() ? "Failed to create WGL/D3D11 shared texture target" : dx_error_).ThrowAsJavaScriptException();
-      return env.Null();
-    }
-
-    wglMakeCurrent(win_dc_, win_gl_context_);
-    if (!wglDXLockObjectsNV_(dx_interop_device_, 1, &dx_interop_object_)) {
-      Napi::Error::New(env, "wglDXLockObjectsNV failed").ThrowAsJavaScriptException();
-      return env.Null();
-    }
-
-    glBindFramebuffer_(GL_FRAMEBUFFER, win_gl_fbo_);
-    mpv_opengl_fbo fbo = {
-      static_cast<int>(win_gl_fbo_),
-      width,
-      height,
-      GL_RGBA8,
-    };
-    int flip_y = 0;
-    mpv_render_param params[] = {
-      {MPV_RENDER_PARAM_OPENGL_FBO, &fbo},
-      {MPV_RENDER_PARAM_FLIP_Y, &flip_y},
-      {MPV_RENDER_PARAM_INVALID, nullptr},
-    };
-
-    mpv_render_context_update(render_context_);
-    int ret = mpv_render_context_render(render_context_, params);
-    glFlush();
-    BOOL unlocked = wglDXUnlockObjectsNV_(dx_interop_device_, 1, &dx_interop_object_);
-    if (ret < 0) {
-      throw_mpv_error(env, "mpv_render_context_render(opengl)", ret);
-      return env.Null();
-    }
-    if (!unlocked) {
-      Napi::Error::New(env, "wglDXUnlockObjectsNV failed").ThrowAsJavaScriptException();
-      return env.Null();
-    }
-
-    DxExportSlot& slot = dx_export_slots_[slot_id];
-    HRESULT copy_hr = slot.keyed_mutex->AcquireSync(0, 1000);
-    if (FAILED(copy_hr)) {
-      Napi::Error::New(env, "IDXGIKeyedMutex::AcquireSync failed: " + hex_u32(static_cast<unsigned long>(copy_hr))).ThrowAsJavaScriptException();
-      return env.Null();
-    }
-    d3d_context_->CopyResource(slot.texture, d3d_interop_texture_);
-    d3d_context_->Flush();
-    copy_hr = slot.keyed_mutex->ReleaseSync(0);
-    if (FAILED(copy_hr)) {
-      Napi::Error::New(env, "IDXGIKeyedMutex::ReleaseSync failed: " + hex_u32(static_cast<unsigned long>(copy_hr))).ThrowAsJavaScriptException();
-      return env.Null();
-    }
-
-    slot.in_flight = true;
-
-    Napi::Object handle = Napi::Object::New(env);
-    uintptr_t nt_handle = reinterpret_cast<uintptr_t>(slot.shared_handle);
-    handle.Set("ntHandle", Napi::Buffer<uint8_t>::Copy(
-      env,
-      reinterpret_cast<uint8_t*>(&nt_handle),
-      sizeof(nt_handle)
-    ));
-
-    Napi::Object size = Napi::Object::New(env);
-    size.Set("width", width);
-    size.Set("height", height);
-
-    Napi::Object rect = Napi::Object::New(env);
-    rect.Set("x", 0);
-    rect.Set("y", 0);
-    rect.Set("width", width);
-    rect.Set("height", height);
-
-    Napi::Object colorSpace = Napi::Object::New(env);
-    colorSpace.Set("primaries", "bt709");
-    colorSpace.Set("transfer", "gamma24");
-    colorSpace.Set("matrix", "rgb");
-    colorSpace.Set("range", "full");
-
-    Napi::Object textureInfo = Napi::Object::New(env);
-    textureInfo.Set("id", std::to_string(reinterpret_cast<uintptr_t>(slot.shared_handle)));
-    textureInfo.Set("slotId", slot_id);
-    textureInfo.Set("busy", false);
-    textureInfo.Set("pixelFormat", "bgra");
-    textureInfo.Set("codedSize", size);
-    textureInfo.Set("visibleRect", rect);
-    textureInfo.Set("contentRect", rect);
-    textureInfo.Set("timestamp", static_cast<double>(timestamp_us_++));
-    textureInfo.Set("colorSpace", colorSpace);
-    textureInfo.Set("handle", handle);
-
-    return textureInfo;
+    Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
+    (new SharedTextureWorker(this, deferred, width, height))->Queue();
+    return deferred.Promise();
 #endif
   }
 
@@ -733,7 +667,7 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
 #ifdef _WIN32
     if (info.Length() >= 1 && info[0].IsNumber()) {
       int slot_id = info[0].As<Napi::Number>().Int32Value();
-      if (slot_id >= 0 && slot_id < dx_slot_count_) dx_export_slots_[slot_id].in_flight = false;
+      if (slot_id >= 0 && slot_id < dx_slot_count_) dx_slot_released_[slot_id].store(true, std::memory_order_release);
     }
 #endif
     return info.Env().Undefined();
@@ -1152,6 +1086,79 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
     for (auto& slot : dx_export_slots_) destroy_dx_export_slot(slot);
   }
 
+  bool render_shared_texture_win(int width, int height, SharedTextureResult& result, std::string& error) {
+    for (int slot_id = 0; slot_id < dx_slot_count_; ++slot_id) {
+      if (dx_slot_released_[slot_id].exchange(false, std::memory_order_acq_rel)) {
+        dx_export_slots_[slot_id].in_flight = false;
+      }
+    }
+    int slot_id = acquire_dx_export_slot();
+    if (slot_id < 0) {
+      result.busy = true;
+      return true;
+    }
+
+    if (!ensure_dx_shared_target(width, height) || !ensure_dx_export_slot(slot_id, width, height)) {
+      error = dx_error_.empty() ? "Failed to create WGL/D3D11 shared texture target" : dx_error_;
+      wglMakeCurrent(nullptr, nullptr);
+      return false;
+    }
+    if (!wglMakeCurrent(win_dc_, win_gl_context_)) {
+      error = "wglMakeCurrent failed: " + hex_u32(GetLastError());
+      return false;
+    }
+    if (!wglDXLockObjectsNV_(dx_interop_device_, 1, &dx_interop_object_)) {
+      error = "wglDXLockObjectsNV failed: " + hex_u32(GetLastError());
+      wglMakeCurrent(nullptr, nullptr);
+      return false;
+    }
+
+    glBindFramebuffer_(GL_FRAMEBUFFER, win_gl_fbo_);
+    mpv_opengl_fbo fbo = {static_cast<int>(win_gl_fbo_), width, height, GL_RGBA8};
+    int flip_y = 0;
+    mpv_render_param params[] = {
+      {MPV_RENDER_PARAM_OPENGL_FBO, &fbo},
+      {MPV_RENDER_PARAM_FLIP_Y, &flip_y},
+      {MPV_RENDER_PARAM_INVALID, nullptr},
+    };
+    mpv_render_context_update(render_context_);
+    int ret = mpv_render_context_render(render_context_, params);
+    glFlush();
+    BOOL unlocked = wglDXUnlockObjectsNV_(dx_interop_device_, 1, &dx_interop_object_);
+    wglMakeCurrent(nullptr, nullptr);
+    if (ret < 0) {
+      error = "mpv_render_context_render(opengl) failed: " + mpv_error_text(ret);
+      return false;
+    }
+    if (!unlocked) {
+      error = "wglDXUnlockObjectsNV failed: " + hex_u32(GetLastError());
+      return false;
+    }
+
+    DxExportSlot& slot = dx_export_slots_[slot_id];
+    HRESULT copy_hr = slot.keyed_mutex->AcquireSync(0, 1000);
+    if (FAILED(copy_hr)) {
+      error = "IDXGIKeyedMutex::AcquireSync failed: " + hex_u32(static_cast<unsigned long>(copy_hr));
+      return false;
+    }
+    d3d_context_->CopyResource(slot.texture, d3d_interop_texture_);
+    d3d_context_->Flush();
+    copy_hr = slot.keyed_mutex->ReleaseSync(0);
+    if (FAILED(copy_hr)) {
+      error = "IDXGIKeyedMutex::ReleaseSync failed: " + hex_u32(static_cast<unsigned long>(copy_hr));
+      return false;
+    }
+
+    slot.in_flight = true;
+    dx_slot_released_[slot_id].store(false, std::memory_order_release);
+    result.slot_id = slot_id;
+    result.width = width;
+    result.height = height;
+    result.nt_handle = reinterpret_cast<uintptr_t>(slot.shared_handle);
+    result.timestamp = timestamp_us_++;
+    return true;
+  }
+
   int acquire_dx_export_slot() {
     for (int offset = 0; offset < dx_slot_count_; ++offset) {
       int slot_id = (dx_next_slot_ + offset) % dx_slot_count_;
@@ -1323,6 +1330,7 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
   int dx_width_ = 0;
   int dx_height_ = 0;
   std::string dx_error_;
+  std::array<std::atomic<bool>, 3> dx_slot_released_{};
   PFNGLGENFRAMEBUFFERSPROC glGenFramebuffers_ = nullptr;
   PFNGLBINDFRAMEBUFFERPROC glBindFramebuffer_ = nullptr;
   PFNGLFRAMEBUFFERTEXTURE2DPROC glFramebufferTexture2D_ = nullptr;
@@ -1336,6 +1344,75 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
   PFNWGLDXUNLOCKOBJECTSNVPROC wglDXUnlockObjectsNV_ = nullptr;
 #endif
 };
+
+#ifdef _WIN32
+SharedTextureWorker::SharedTextureWorker(
+    MpvPlayer* player,
+    Napi::Promise::Deferred deferred,
+    int width,
+    int height)
+    : Napi::AsyncWorker(deferred.Env(), "astria:shared-texture-render"),
+      player_(player),
+      deferred_(deferred),
+      width_(width),
+      height_(height) {
+  player_->Ref();
+}
+
+void SharedTextureWorker::Execute() {
+  std::string error;
+  if (!player_->render_shared_texture_win(width_, height_, result_, error)) SetError(error);
+}
+
+void SharedTextureWorker::OnOK() {
+  Napi::Env env = Env();
+  if (result_.busy) {
+    Napi::Object busy = Napi::Object::New(env);
+    busy.Set("busy", true);
+    deferred_.Resolve(busy);
+    player_->Unref();
+    return;
+  }
+
+  Napi::Object handle = Napi::Object::New(env);
+  handle.Set("ntHandle", Napi::Buffer<uint8_t>::Copy(
+    env,
+    reinterpret_cast<uint8_t*>(&result_.nt_handle),
+    sizeof(result_.nt_handle)
+  ));
+  Napi::Object size = Napi::Object::New(env);
+  size.Set("width", result_.width);
+  size.Set("height", result_.height);
+  Napi::Object rect = Napi::Object::New(env);
+  rect.Set("x", 0);
+  rect.Set("y", 0);
+  rect.Set("width", result_.width);
+  rect.Set("height", result_.height);
+  Napi::Object color_space = Napi::Object::New(env);
+  color_space.Set("primaries", "bt709");
+  color_space.Set("transfer", "gamma24");
+  color_space.Set("matrix", "rgb");
+  color_space.Set("range", "full");
+  Napi::Object texture_info = Napi::Object::New(env);
+  texture_info.Set("id", std::to_string(result_.nt_handle));
+  texture_info.Set("slotId", result_.slot_id);
+  texture_info.Set("busy", false);
+  texture_info.Set("pixelFormat", "bgra");
+  texture_info.Set("codedSize", size);
+  texture_info.Set("visibleRect", rect);
+  texture_info.Set("contentRect", rect);
+  texture_info.Set("timestamp", static_cast<double>(result_.timestamp));
+  texture_info.Set("colorSpace", color_space);
+  texture_info.Set("handle", handle);
+  deferred_.Resolve(texture_info);
+  player_->Unref();
+}
+
+void SharedTextureWorker::OnError(const Napi::Error& error) {
+  deferred_.Reject(error.Value());
+  player_->Unref();
+}
+#endif
 
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   return MpvPlayer::Init(env, exports);

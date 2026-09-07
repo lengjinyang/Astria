@@ -176,9 +176,6 @@ class Session {
     if (active) this.lockedOutputTarget = { ...this.outputTarget };
     else {
       this.lockedOutputTarget = null;
-      // Normal playback updates remain coalesced while Windows owns the native
-      // move/resize loop. Present the latest decoded frame as soon as it ends.
-      this.queueFrame(false);
     }
   }
   requestSourceFrame(request) {
@@ -204,10 +201,6 @@ class Session {
   }
   queueFrame(markPending = true) {
     if (markPending) this.pending = true;
-    // Rendering a shared texture is synchronous native work on Electron's main
-    // thread. Holding the last full-quality frame during a native window move
-    // keeps that thread available for Win32 movement while mpv/audio continue.
-    if (this.windowInteraction && !this.exactFrames.length) return;
     if (this.pumping || !this.loaded || this.closed) return;
     this.pumping = this.pump().finally(() => {
       this.pumping = null;
@@ -216,7 +209,6 @@ class Session {
   }
   async pump() {
     while ((this.pending || this.exactFrames.length) && !this.closed) {
-      if (this.windowInteraction && !this.exactFrames.length) return;
       const request = this.exactFrames.length ? this.exactFrames.shift() : null;
       if (!request) this.pending = false;
       const { width, height, mode, revision } = this.outputDimensions(request);
@@ -234,7 +226,7 @@ class Session {
         };
         if (this.mode === 'shared-texture') {
           const renderPlayer = this.player;
-          const textureInfo = renderPlayer.renderSharedTexture(width, height);
+          const textureInfo = await renderPlayer.renderSharedTexture(width, height);
           if (textureInfo?.busy) {
             this.frameId -= 1;
             if (request) this.exactFrames.unshift(request); else this.pending = true;
