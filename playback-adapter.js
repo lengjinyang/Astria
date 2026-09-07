@@ -25,7 +25,7 @@
         });
       }
     }
-    open(media) { this.media = media; this.emit('loading'); this.element.src = media.url; this.element.load(); }
+    open(media) { this.media = media; this.emit('loading'); this.element.preload = 'auto'; this.element.src = media.url; this.element.load(); }
     play() { this.stopReverse(); return this.element.play(); }
     pause() { this.stopReverse(); this.element.pause(); }
     seek(time) { this.element.currentTime = time; }

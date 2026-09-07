@@ -63,7 +63,8 @@
     pixelInspectorLocked: false, pixelSample: null, pixelSampleCanvas: null,
     annotationThumbnails: {},
     timelinePreviewVideo: null, timelinePreviewPending: null, timelinePreviewRaf: null, timelinePreviewGeneration: 0, timelinePreviewCache: new Map(), timelinePreviewActive: null, timelinePreviewWarmIndex: 0, timelinePreviewWarmTimer: null,
-    initialMediaPresentationSent: false
+    initialMediaPresentationSent: false,
+    mediaLoadGeneration: 0, mediaAwaitingMetadata: false, mediaAwaitingFirstFrame: false, mediaReplacing: false, mediaTransitionTimer: null
     ,colorPreset: 'original', colorRenderer: null, colorLuts: new Map(), colorRenderPending: false,
     guidesMaster: true, guideThirds: false, guideGolden: false, guideSpiral: false, guideSpiralRotation: 0, guideCenter: false, guideDiagonal: false, guideTriangle: false, guideSymmetry: false, guideActionSafe: false, guideTitleSafe: false, guideAspect: 'off', guideOpacity: .55, guideMaskStrength: .55,
     contactCandidates: [], contactSheetCancel: false, contactSheetBusy: false
@@ -78,6 +79,15 @@
   const sourceFrame = frame => Math.round(frame) + (state.fileMeta?.sourceFrameOffset || 0);
   const missingFrameNotice = document.createElement('div');
   missingFrameNotice.className = 'missing-frame-notice'; missingFrameNotice.hidden = true; els.mediaSurface.appendChild(missingFrameNotice);
+  const mediaTransitionCanvas = document.createElement('canvas');
+  mediaTransitionCanvas.className = 'media-transition-canvas'; mediaTransitionCanvas.setAttribute('aria-hidden', 'true'); els.mediaSurface.appendChild(mediaTransitionCanvas);
+  const mediaLoadingOverlay = document.createElement('div');
+  mediaLoadingOverlay.className = 'media-loading-overlay'; mediaLoadingOverlay.setAttribute('role', 'status'); mediaLoadingOverlay.setAttribute('aria-live', 'polite'); mediaLoadingOverlay.setAttribute('aria-hidden', 'true');
+  const mediaLoadingSpinner = document.createElement('i'); mediaLoadingSpinner.className = 'media-loading-spinner'; mediaLoadingSpinner.setAttribute('aria-hidden', 'true');
+  const mediaLoadingCopy = document.createElement('span'); mediaLoadingCopy.className = 'media-loading-copy';
+  const mediaLoadingTitle = document.createElement('b'); mediaLoadingTitle.textContent = '正在载入画面';
+  const mediaLoadingName = document.createElement('small');
+  mediaLoadingCopy.append(mediaLoadingTitle, mediaLoadingName); mediaLoadingOverlay.append(mediaLoadingSpinner, mediaLoadingCopy); els.viewerStage.appendChild(mediaLoadingOverlay);
   const selectedBookmark = () => state.bookmarks.find(b => state.selectedBookmarkIds.includes(b.id));
 
   function formatTimecode(seconds) {
@@ -961,6 +971,69 @@
     }
   }
 
+  function clearMediaTransitionFrame() {
+    clearTimeout(state.mediaTransitionTimer);
+    state.mediaTransitionTimer = null;
+    mediaTransitionCanvas.classList.remove('visible', 'releasing');
+    const context = mediaTransitionCanvas.getContext('2d', { alpha: false });
+    context.clearRect(0, 0, mediaTransitionCanvas.width, mediaTransitionCanvas.height);
+  }
+
+  function captureMediaTransitionFrame() {
+    if (playback.readyState < 2 || !playback.videoWidth || !playback.currentFrameCanvas) return false;
+    clearMediaTransitionFrame();
+    let source = playback.currentFrameCanvas;
+    if (state.colorPreset !== 'original' && els.colorCanvas.width && els.colorCanvas.height) source = els.colorCanvas;
+    else if (els.cacheCanvas.classList.contains('visible') && els.cacheCanvas.width && els.cacheCanvas.height) source = els.cacheCanvas;
+    const sourceWidth = source.width || playback.videoWidth, sourceHeight = source.height || playback.videoHeight;
+    const scale = Math.min(1, 960 / sourceWidth, 540 / sourceHeight);
+    mediaTransitionCanvas.width = Math.max(2, Math.round(sourceWidth * scale));
+    mediaTransitionCanvas.height = Math.max(2, Math.round(sourceHeight * scale));
+    try {
+      mediaTransitionCanvas.getContext('2d', { alpha: false }).drawImage(source, 0, 0, mediaTransitionCanvas.width, mediaTransitionCanvas.height);
+      mediaTransitionCanvas.classList.add('visible');
+      return true;
+    } catch { clearMediaTransitionFrame(); return false; }
+  }
+
+  function releaseMediaTransitionFrame(generation) {
+    if (generation !== state.mediaLoadGeneration || !mediaTransitionCanvas.classList.contains('visible')) return;
+    mediaTransitionCanvas.classList.add('releasing');
+    state.mediaTransitionTimer = setTimeout(() => {
+      if (generation === state.mediaLoadGeneration) clearMediaTransitionFrame();
+    }, 220);
+  }
+
+  function presentLoadedMediaFrame() {
+    if (!state.mediaAwaitingFirstFrame || state.mediaAwaitingMetadata) return;
+    const generation = state.mediaLoadGeneration;
+    const hadTransitionFrame = state.mediaReplacing;
+    state.mediaAwaitingFirstFrame = false;
+    state.mediaReplacing = false;
+    els.viewerStage.classList.add('has-video');
+    setMediaReady(true);
+    updateUI(true);
+    captureFrame();
+    requestAnimationFrame(() => {
+      if (generation !== state.mediaLoadGeneration) return;
+      document.body.classList.remove('media-loading', 'media-replacing');
+      mediaLoadingOverlay.setAttribute('aria-hidden', 'true');
+      setStatus(playback.paused ? '视频已就绪' : '播放中');
+      if (hadTransitionFrame) requestAnimationFrame(() => releaseMediaTransitionFrame(generation));
+    });
+  }
+
+  function failMediaLoad() {
+    state.mediaAwaitingMetadata = false;
+    state.mediaAwaitingFirstFrame = false;
+    state.mediaReplacing = false;
+    document.body.classList.remove('media-loading', 'media-replacing');
+    mediaLoadingOverlay.setAttribute('aria-hidden', 'true');
+    clearMediaTransitionFrame();
+    els.viewerStage.classList.remove('has-video');
+    setMediaReady(false);
+  }
+
   function loadMediaSource(media, ownedObjectUrl = null) {
     if (!media?.url || !media?.name) { toast('请选择有效的视频文件'); return; }
     persistCurrentWorkspaceNow();
@@ -969,13 +1042,24 @@
     cancelTextAnnotation();
     unlockPixelInspector(true);
     $('#transportSettings').removeAttribute('open');
+    const replacingMedia = document.body.classList.contains('media-ready') && captureMediaTransitionFrame();
     clearFrameCache();
     disposeTimelinePreview();
     state.annotationUndo = []; state.quickGesture = null;
     state.viewerZoomMode = 'fit'; state.viewerZoom = 1; state.viewerPan = { x: 0, y: 0 };
-    setMediaReady(false);
+    state.mediaLoadGeneration += 1;
+    state.mediaAwaitingMetadata = true;
+    state.mediaAwaitingFirstFrame = true;
+    state.mediaReplacing = replacingMedia;
+    if (!replacingMedia) {
+      clearMediaTransitionFrame();
+      setMediaReady(false);
+      els.viewerStage.classList.remove('has-video');
+    }
     document.body.classList.add('media-loading');
-    els.viewerStage.classList.remove('has-video');
+    document.body.classList.toggle('media-replacing', replacingMedia);
+    mediaLoadingOverlay.setAttribute('aria-hidden', 'false');
+    mediaLoadingName.textContent = media.name;
     els.ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
     if (state.currentObjectUrl) URL.revokeObjectURL(state.currentObjectUrl);
     state.currentObjectUrl = ownedObjectUrl;
@@ -1009,7 +1093,10 @@
     refreshRecentVideos();
   }
 
-  function onMetadata() {
+  function onMetadata(event) {
+    const metadata = event?.detail || playback.media;
+    if (state.mediaAwaitingMetadata && state.fileMeta?.mediaId && metadata?.mediaId && metadata.mediaId !== state.fileMeta.mediaId) return;
+    state.mediaAwaitingMetadata = false;
     state.fileMeta.sourceFps = Number(playback.media?.sourceFps || playback.media?.fps) || null;
     if (state.fileMeta.mediaKind === 'video' && state.fpsMode === 'source' && state.fileMeta.sourceFps) {
       state.fps = state.fileMeta.sourceFps;
@@ -1018,16 +1105,13 @@
       $('#hudFps').textContent = `${Number(state.fps.toFixed(3))} FPS`;
       $('#propFps').textContent = `${Number(state.fps.toFixed(3))} fps`;
     }
-    document.body.classList.remove('media-loading');
-    els.viewerStage.classList.add('has-video');
-    setMediaReady(true);
     playback.playbackRate = state.playbackSpeed;
     $('#hudResolution').textContent = `${playback.videoWidth} × ${playback.videoHeight}`;
     $('#propFilename').textContent = state.fileName;
     $('#propResolution').textContent = `${playback.videoWidth} × ${playback.videoHeight}`;
     $('#propDuration').textContent = formatClock(playback.duration);
     $('#propFrames').textContent = totalFrames().toLocaleString();
-    setStatus('视频已就绪');
+    setStatus(state.mediaAwaitingFirstFrame ? '正在准备首帧' : (playback.paused ? '视频已就绪' : '播放中'));
     resetViewerView(false); renderTimeline(); updateUI(); startFrameCacheLoop(); captureFrame(); renderCompositionGuides();
     if (state.colorPreset !== 'original') scheduleColorRender();
     if (state.timelineHoverPreview) ensureTimelinePreviewVideo();
@@ -1932,18 +2016,40 @@
   async function initializeDesktopRuntime() {
     if (!desktopAPI) return;
     document.body.classList.add('desktop-runtime');
-    const version = await desktopAPI.getVersion().catch(() => '0.8.7');
-    $('#runtimeLabel').textContent = `V${version}`;
-    $('#runtimeLabel').title = `DESKTOP · V${version}`;
     desktopAPI.onOpenVideo(openDesktopVideo);
     desktopAPI.onCommand(handleDesktopCommand);
     desktopAPI.onWindowState(applyDesktopWindowState);
-    applyDesktopWindowState(await desktopAPI.getWindowState().catch(() => null));
     $('#clearRecentBtn').addEventListener('click', async () => { await desktopAPI.clearRecentVideos(); refreshRecentVideos(); });
-    const launchMedia = await desktopAPI.consumeLaunchMedia().catch(() => null);
+    const versionPromise = desktopAPI.getVersion().catch(() => '0.8.7');
+    const windowStatePromise = desktopAPI.getWindowState().catch(() => null);
+    const launchMediaPromise = desktopAPI.consumeLaunchMedia().catch(() => null);
+    void versionPromise.then(version => {
+      $('#runtimeLabel').textContent = `V${version}`;
+      $('#runtimeLabel').title = `DESKTOP · V${version}`;
+    });
+    void windowStatePromise.then(applyDesktopWindowState);
+    const launchMedia = await launchMediaPromise;
     if (launchMedia) openDesktopVideo(launchMedia);
-    else desktopAPI.initialMediaPresented?.();
-    await refreshRecentVideos();
+    else {
+      desktopAPI.initialMediaPresented?.();
+      void refreshRecentVideos();
+    }
+  }
+
+  function deferNonCriticalWork(callback) {
+    if ('requestIdleCallback' in window) window.requestIdleCallback(callback, { timeout: 1800 });
+    else setTimeout(callback, 350);
+  }
+
+  function scheduleBuiltInColorLutPreload() {
+    const preload = () => deferNonCriticalWork(() => { void preloadBuiltInColorLuts(); });
+    if (state.mediaAwaitingFirstFrame) playback.addEventListener('frame', preload, { once: true });
+    else preload();
+  }
+
+  function schedulePlaybackWarmup() {
+    if (!desktopAPI || state.mediaAwaitingFirstFrame || typeof playback.ensureSession !== 'function') return;
+    deferNonCriticalWork(() => { void playback.ensureSession().catch(() => {}); });
   }
 
   async function copyFrame(withAnnotations) {
@@ -2389,8 +2495,8 @@
     els.viewerStage.addEventListener('drop',e=>{e.preventDefault();els.viewerStage.classList.remove('dragover');openVideo(e.dataTransfer.files[0]);});
     playback.addEventListener('metadata',onMetadata);
     playback.addEventListener('frame',announceInitialMediaPresented,{once:true});
-    playback.addEventListener('error',()=>{document.body.classList.remove('media-loading');announceInitialMediaPresented(true);setMediaReady(false);setStatus('视频载入失败');toast(playback.error?.message || '无法播放此视频，请检查编码格式');});
-    playback.addEventListener('frame',()=>{if(!state.timelineScrub&&!state.scrub&&!state.timelineSeek.inFlight)updateUI();if(!playback.requestVideoFrameCallback){captureFrame();scheduleColorRender();}});
+    playback.addEventListener('error',()=>{failMediaLoad();announceInitialMediaPresented(true);setStatus('视频载入失败');toast(playback.error?.message || '无法播放此视频，请检查编码格式');});
+    playback.addEventListener('frame',()=>{presentLoadedMediaFrame();if(!state.timelineScrub&&!state.scrub&&!state.timelineSeek.inFlight)updateUI();if(!playback.requestVideoFrameCallback){captureFrame();scheduleColorRender();}});
     playback.addEventListener('frame',event=>{if(event.detail?.seeked)onResponsiveSeeked();});
     playback.addEventListener('playing',()=>{state.timelineSeek.displayGate=false;state.timelineSeek.displayFrame=null;hideCachedFrame();els.playBtn.classList.add('playing');setStatus('播放中');startPlaybackUiLoop();revealCleanControls();});
     playback.addEventListener('paused',()=>{els.playBtn.classList.remove('playing');stopPlaybackUiLoop();if(!state.isReverse)setStatus('已暂停');revealCleanControls();});
@@ -2719,8 +2825,10 @@
     else if(e.key==='Delete')deleteSelection(); else if(e.key==='Escape'){els.helpModal.classList.remove('open');}
   }
 
-  await loadWorkspace(); void preloadBuiltInColorLuts(); bindEvents(); setMediaReady(false); renderBookmarks(); renderAnnotationList(); syncNotes(); updateUI();
+  await loadWorkspace(); bindEvents(); setMediaReady(false); renderBookmarks(); renderAnnotationList(); syncNotes(); updateUI();
   await initializeDesktopRuntime();
+  schedulePlaybackWarmup();
+  scheduleBuiltInColorLutPreload();
   if (window.__astriaPlayback) {
     window.__astriaResponsiveSeekTest = {
       trace: [],
