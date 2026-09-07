@@ -825,8 +825,16 @@
 
   function scheduleScrubPrefetch(delay = 600) {
     clearTimeout(state.scrubPrefetchTimer);
-    if (!playback.duration) return;
+    if (!playback.duration || !playback.paused) return;
     state.scrubPrefetchTimer = setTimeout(prefetchScrubWindow, delay);
+  }
+
+  function warmScrubDecoder(frame = currentFrame()) {
+    if (!playback.duration || state.scrubDecoder || state.scrubDecoderPromise) return;
+    const generation = state.frameCacheGeneration;
+    ensureScrubDecoder(frame).then(() => {
+      if (generation === state.frameCacheGeneration && !state.scrubController.active) scheduleScrubPrefetch(0);
+    }).catch(() => {});
   }
 
   async function prefetchScrubWindow() {
@@ -834,11 +842,13 @@
       scheduleScrubPrefetch(900); return;
     }
     const generation = state.frameCacheGeneration, anchor = currentFrame();
-    const direction = state.scrubController.direction || 1;
-    const forward = direction > 0 ? 33 : 14, backward = direction > 0 ? 14 : 33;
-    const targets = [];
-    for (let distance = 0; distance <= forward; distance++) targets.push(clamp(anchor + distance * direction, 0, lastFrame()));
-    for (let distance = 1; distance <= backward; distance++) targets.push(clamp(anchor - distance * direction, 0, lastFrame()));
+    const direction = state.scrubController.direction;
+    const forward = direction ? 33 : 23, backward = direction ? 14 : 23;
+    const primaryDirection = direction || 1, targets = [anchor];
+    for (let distance = 1; distance <= Math.max(forward, backward); distance++) {
+      if (distance <= forward) targets.push(clamp(anchor + distance * primaryDirection, 0, lastFrame()));
+      if (distance <= backward) targets.push(clamp(anchor - distance * primaryDirection, 0, lastFrame()));
+    }
     state.scrubWorkerBusy = true;
     const work = (async () => {
       try {
@@ -1130,7 +1140,7 @@
     $('#propDuration').textContent = formatClock(playback.duration);
     $('#propFrames').textContent = totalFrames().toLocaleString();
     setStatus('视频已就绪');
-    resetViewerView(false); renderTimeline(); updateUI(); startFrameCacheLoop(); captureFrame(); renderCompositionGuides(); scheduleScrubPrefetch(250);
+    resetViewerView(false); renderTimeline(); updateUI(); startFrameCacheLoop(); captureFrame(); renderCompositionGuides(); warmScrubDecoder();
     if (state.colorPreset !== 'original') scheduleColorRender();
     if (state.timelineHoverPreview) ensureTimelinePreviewVideo();
     saveWorkspace();
@@ -1562,7 +1572,7 @@
     if (!gesture.drawing) {
       gesture.drawing = true; pause();
       if (gesture.tool === 'select') {
-        gesture.scrubStartFrame = currentFrame(); beginProfessionalScrub();
+        gesture.scrubTargetFrame = currentFrame(); gesture.scrubLastX = gesture.startX; beginProfessionalScrub();
       } else if (gesture.tool !== 'eraser') {
         const rect = els.canvas.getBoundingClientRect();
         const startEvent = { clientX: gesture.startX, clientY: gesture.startY };
@@ -1572,9 +1582,12 @@
     }
     e.preventDefault();
     if (gesture.tool === 'select') {
-      const px = e.clientX - gesture.startX;
       const factor = e.altKey ? 1 : (e.shiftKey ? state.viewerScrubSensitivity * .2 : state.viewerScrubSensitivity);
-      updateProfessionalScrubTarget(gesture.scrubStartFrame + px * factor);
+      const presented = state.scrubController.presentedFrame ?? currentFrame();
+      gesture.scrubTargetFrame = clamp(gesture.scrubTargetFrame + (e.clientX - gesture.scrubLastX) * factor,
+        Math.max(0, presented - 4), Math.min(lastFrame(), presented + 4));
+      gesture.scrubLastX = e.clientX;
+      updateProfessionalScrubTarget(gesture.scrubTargetFrame);
     } else if (gesture.tool === 'eraser') eraseAnnotationsAt(e.clientX, e.clientY);
     else {
       const p = canvasPoint(e); gesture.annotation.end = p;
@@ -2201,10 +2214,9 @@
     const controller = state.scrubController;
     if (!controller.active || controller.inFlight || state.scrubWorkerBusy || !playback.duration) return;
     const presented = controller.presentedFrame ?? currentFrame();
-    const pointer = controller.pointerTargetFrame ?? presented;
-    controller.targetFrame = clamp(pointer, Math.max(0, presented - 4), Math.min(lastFrame(), presented + 4));
-    if (controller.targetFrame === presented) return;
-    const direction = Math.sign(controller.targetFrame - presented), nextFrame = presented + direction;
+    const acceptedTarget = controller.targetFrame ?? presented;
+    if (acceptedTarget === presented) return;
+    const direction = Math.sign(acceptedTarget - presented), nextFrame = presented + direction;
     controller.direction = direction; controller.inFlight = true;
     const interaction = state.scrubInteraction, generation = state.frameCacheGeneration;
     state.scrubWorkerBusy = true;
@@ -2316,7 +2328,7 @@
     }
     if (e.target.closest('.clean-window-controls')) return;
     if (!playback.duration || e.button !== 0) return;
-    state.scrub={pointerId:e.pointerId,startX:e.clientX,startY:e.clientY,startFrame:currentFrame(),lastFrame:currentFrame(),dragging:false};
+    state.scrub={pointerId:e.pointerId,startX:e.clientX,startY:e.clientY,lastX:e.clientX,targetFrame:currentFrame(),lastFrame:currentFrame(),dragging:false};
     els.viewerStage.setPointerCapture(e.pointerId);
   }
 
@@ -2328,7 +2340,11 @@
     if(!state.scrub.dragging){state.scrub.dragging=true;beginProfessionalScrub();els.viewerStage.classList.add('scrubbing-viewer');}
     e.preventDefault();
     const factor=e.altKey?1:(e.shiftKey?state.viewerScrubSensitivity*.2:state.viewerScrubSensitivity);
-    const next=Math.round(state.scrub.startFrame+px*factor);
+    const presented=state.scrubController.presentedFrame??currentFrame();
+    state.scrub.targetFrame=clamp(state.scrub.targetFrame+(e.clientX-state.scrub.lastX)*factor,
+      Math.max(0,presented-4),Math.min(lastFrame(),presented+4));
+    state.scrub.lastX=e.clientX;
+    const next=Math.round(state.scrub.targetFrame);
     state.scrub.lastFrame=clamp(next,0,lastFrame()); updateProfessionalScrubTarget(state.scrub.lastFrame);
   }
 
@@ -2533,8 +2549,8 @@
     playback.addEventListener('error',()=>{document.body.classList.remove('media-loading');announceInitialMediaPresented(true);setMediaReady(false);setStatus('视频载入失败');toast(playback.error?.message || '无法播放此视频，请检查编码格式');});
     playback.addEventListener('frame',()=>{if(!state.timelineScrub&&!state.scrub&&!state.scrubController.active&&!state.scrubFinalizing)updateUI();if(!playback.requestVideoFrameCallback){captureFrame();scheduleColorRender();}});
     playback.addEventListener('frame',event=>{if(event.detail?.seeked)onPlaybackSeeked();});
-    playback.addEventListener('playing',()=>{hideCachedFrame();els.playBtn.classList.add('playing');setStatus('播放中');startPlaybackUiLoop();revealCleanControls();});
-    playback.addEventListener('paused',()=>{els.playBtn.classList.remove('playing');stopPlaybackUiLoop();if(!state.isReverse)setStatus('已暂停');revealCleanControls();});
+    playback.addEventListener('playing',()=>{clearTimeout(state.scrubPrefetchTimer);hideCachedFrame();els.playBtn.classList.add('playing');setStatus('播放中');startPlaybackUiLoop();revealCleanControls();});
+    playback.addEventListener('paused',()=>{els.playBtn.classList.remove('playing');stopPlaybackUiLoop();if(!state.isReverse)setStatus('已暂停');if(!state.scrubController.active&&!state.scrubFinalizing){warmScrubDecoder();scheduleScrubPrefetch(100);}revealCleanControls();});
     playback.addEventListener('ended',handlePlaybackEnded);
     els.playBtn.addEventListener('click',()=>playback.paused&&!state.isReverse?play():pause());
     $('#jumpStartBtn').addEventListener('click',()=>seekFrame(0)); $('#stepBack5Btn').addEventListener('click',()=>step(-5));

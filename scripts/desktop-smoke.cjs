@@ -23,8 +23,12 @@ module.exports = async function smoke(window, catalog, app) {
     });
     await wait(()=>p.readyState >= 2); p.pause(); await wait(()=>p.paused);
     const scrub=window.__astriaScrubTest,startFrame=Math.max(1,Math.min(scrub.snapshot().lastFrame-8,Math.round(p.currentTime*scrub.snapshot().fps)));
+    await p.seekFrameExact(startFrame,scrub.snapshot().fps);
     scrub.trace.length=0; scrub.begin(); scrub.target(startFrame+6);
-    await wait(()=>scrub.snapshot().presentedFrame===startFrame+6);
+    await wait(()=>scrub.snapshot().presentedFrame===startFrame+4);
+    await new Promise(resolve=>setTimeout(resolve,100));
+    if(scrub.snapshot().presentedFrame!==startFrame+4)throw new Error('Scrub backlog was not bounded '+JSON.stringify(scrub.snapshot()));
+    scrub.target(startFrame+6);await wait(()=>scrub.snapshot().presentedFrame===startFrame+6);
     scrub.target(startFrame+2); await wait(()=>scrub.snapshot().presentedFrame===startFrame+2);
     await scrub.end();
     const scrubTrace=[...scrub.trace],contiguous=scrubTrace.every((frame,index)=>!index||Math.abs(frame-scrubTrace[index-1])===1);
