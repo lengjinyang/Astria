@@ -55,6 +55,9 @@ contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
   getVersion: () => ipcRenderer.invoke('vfx:get-version'),
   getWindowState: () => ipcRenderer.invoke('vfx:get-window-state'),
   fitVideoWindow: options => ipcRenderer.invoke('vfx:fit-video-window', options),
+  startWindowDrag: point => ipcRenderer.send('vfx:window-drag-start', point),
+  moveWindowDrag: point => ipcRenderer.send('vfx:window-drag-move', point),
+  endWindowDrag: point => ipcRenderer.send('vfx:window-drag-end', point),
   minimizeWindow: () => ipcRenderer.invoke('vfx:window-minimize'),
   toggleMaximizeWindow: () => ipcRenderer.invoke('vfx:window-toggle-maximize'),
   closeWindow: () => ipcRenderer.invoke('vfx:window-close'),
@@ -63,5 +66,6 @@ contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
   onCommand: callback => on('vfx:command', callback),
   onTitlebarHover: callback => on('vfx:titlebar-hover', callback),
   onWindowPointer: callback => on('vfx:window-pointer', callback),
+  onWindowInteraction: callback => on('vfx:window-interaction', callback),
   onWindowState: callback => on('vfx:window-state', callback)
 }));

@@ -33,6 +33,7 @@ let deferInitialWindowShow = false;
 let mainWindowReadyToShow = false;
 let initialMediaPresented = false;
 let initialShowFallback = null;
+let smoothWindowDrag = null;
 const isSmokeTest = process.argv.includes('--smoke-test');
 if (isSmokeTest) app.setPath('userData', path.resolve('.cache/desktop-smoke-profile'));
 
@@ -306,6 +307,27 @@ function createWindow() {
   mainWindow.webContents.once('did-finish-load', broadcastWindowState);
   ['maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen'].forEach(eventName => mainWindow.on(eventName, broadcastWindowState));
   ['unmaximize', 'leave-full-screen'].forEach(eventName => mainWindow.on(eventName, () => setTimeout(fitCleanVideoWindow, 0)));
+  let windowInteractionActive = false;
+  let windowInteractionTimer = null;
+  const reportWindowInteraction = () => {
+    if (!windowInteractionActive) {
+      windowInteractionActive = true;
+      mainWindow.webContents.send('vfx:window-interaction', true);
+    }
+    clearTimeout(windowInteractionTimer);
+    windowInteractionTimer = setTimeout(() => {
+      windowInteractionActive = false;
+      if (!mainWindow?.isDestroyed()) mainWindow.webContents.send('vfx:window-interaction', false);
+    }, 120);
+  };
+  mainWindow.on('will-move', reportWindowInteraction);
+  mainWindow.on('will-resize', reportWindowInteraction);
+  mainWindow.on('resized', () => {
+    clearTimeout(windowInteractionTimer);
+    windowInteractionTimer = null;
+    if (windowInteractionActive) mainWindow.webContents.send('vfx:window-interaction', false);
+    windowInteractionActive = false;
+  });
   if (isSmokeTest) {
     mainWindow.webContents.on('console-message', event => console.log('RENDERER', event.message));
     mainWindow.webContents.once('did-finish-load', async () => {
@@ -341,6 +363,8 @@ function createWindow() {
   }, 40);
   mainWindow.on('closed', () => {
     clearInterval(titlebarHoverTimer);
+    clearTimeout(windowInteractionTimer);
+    smoothWindowDrag = null;
     if (initialShowFallback) clearTimeout(initialShowFallback);
     initialShowFallback = null;
     mainWindowReadyToShow = false;
@@ -382,6 +406,24 @@ function registerIpc() {
       fitCleanVideoWindow(mainWindow.getBounds().width + (videoWindowInsets.side - oldSide) * mainWindow.webContents.getZoomFactor());
     }
     return true;
+  });
+  const validWindowDrag = (event, point) => event.sender === mainWindow?.webContents &&
+    Number.isFinite(point?.x) && Number.isFinite(point?.y) && Math.abs(point.x) < 100000 && Math.abs(point.y) < 100000;
+  ipcMain.on('vfx:window-drag-start', (event, point) => {
+    if (!validWindowDrag(event, point) || mainWindow.isMaximized() || mainWindow.isFullScreen()) return;
+    const bounds = mainWindow.getBounds();
+    smoothWindowDrag = { offsetX: point.x - bounds.x, offsetY: point.y - bounds.y };
+  });
+  ipcMain.on('vfx:window-drag-move', (event, point) => {
+    if (!smoothWindowDrag || !validWindowDrag(event, point) || mainWindow.isDestroyed()) return;
+    mainWindow.setPosition(Math.round(point.x - smoothWindowDrag.offsetX), Math.round(point.y - smoothWindowDrag.offsetY), false);
+  });
+  ipcMain.on('vfx:window-drag-end', (event, point) => {
+    if (!validWindowDrag(event, point)) return;
+    if (smoothWindowDrag && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setPosition(Math.round(point.x - smoothWindowDrag.offsetX), Math.round(point.y - smoothWindowDrag.offsetY), false);
+    }
+    smoothWindowDrag = null;
   });
   ipcMain.handle('vfx:open-default-apps', async () => {
     if (process.platform !== 'win32') return false;

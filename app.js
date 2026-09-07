@@ -270,7 +270,7 @@
 
   function blendAmbient() {
     ambient.timer = null;
-    if (!ambient.enabled || document.hidden) return;
+    if (!ambient.enabled || document.hidden || document.body.classList.contains('window-interacting')) return;
     ambientCtx.globalAlpha = .22;
     ambientCtx.drawImage(ambient.target, 0, 0);
     ambientCtx.globalAlpha = 1;
@@ -282,7 +282,7 @@
   }
 
   function sampleAmbient(source) {
-    if (!ambient.enabled || document.hidden || playback.readyState < 2 || !playback.videoWidth) return;
+    if (!ambient.enabled || document.hidden || document.body.classList.contains('window-interacting') || playback.readyState < 2 || !playback.videoWidth) return;
     const now = performance.now();
     if (now - ambient.lastSample < 80) return;
     ambient.lastSample = now;
@@ -457,6 +457,7 @@
     state.reverseTimer = null;
     state.reverseSeekInFlight = false;
     state.isReverse = false;
+    if (playback.paused) document.body.classList.remove('video-playing');
     $('#reverseBtn').classList.remove('active');
     if (wasReverse && playback.duration) {
       const targetTime = clamp(targetFrame / state.fps, 0, playback.duration);
@@ -522,6 +523,7 @@
     state.timelineSeek.pendingFrame = null;
     state.timelineSeek.inFlight = false;
     state.isReverse = true;
+    document.body.classList.add('video-playing');
     revealCleanControls();
     state.reverseAnchorFrame = startFrame;
     state.reverseFrame = state.reverseAnchorFrame;
@@ -1146,7 +1148,7 @@
     state.viewerPan.y = clamp(state.viewerPan.y, -maxY, maxY);
   }
 
-  function resizeCanvas() {
+  function resizeCanvas(lightweight = false) {
     if (!playback.videoWidth) return;
     const stage = els.viewerStage.getBoundingClientRect();
     if (!stage.width || !stage.height) return;
@@ -1157,6 +1159,8 @@
     els.mediaSurface.style.width = `${width}px`;
     els.mediaSurface.style.height = `${height}px`;
     els.mediaSurface.style.transform = `translate3d(${state.viewerPan.x}px,${state.viewerPan.y}px,0)`;
+    updateViewerZoomUI(scale);
+    if (lightweight) return;
     // Keep the falloff outside the picture, including wide pillarbox/letterbox areas.
     const workspace = $('.workspace').getBoundingClientRect();
     ambient.canvas.style.width = `${Math.max(width * 1.5, workspace.width * 1.35)}px`;
@@ -1174,7 +1178,6 @@
     els.canvas.height = Math.max(1, Math.round(height * renderScale));
     els.ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
     scheduleColorRender();
-    updateViewerZoomUI(scale);
     drawAnnotations();
   }
 
@@ -1183,9 +1186,12 @@
     if (state.viewerResizeRaf !== null) return;
     state.viewerResizeRaf = requestAnimationFrame(() => {
       state.viewerResizeRaf = null;
-      resizeCanvas();
-      renderRuler();
-      updatePlaybackUI();
+      const lightweight = document.body.classList.contains('window-interacting');
+      resizeCanvas(lightweight);
+      if (!lightweight) {
+        renderRuler();
+        updatePlaybackUI();
+      }
     });
   }
 
@@ -2013,12 +2019,83 @@
     requestAnimationFrame(() => { resizeCanvas(); renderRuler(); updatePlaybackUI(); });
   }
 
+  let smoothWindowDragGesture = null;
+  function setWindowInteraction(active) {
+    document.body.classList.toggle('window-interacting', active);
+    if (active) {
+      clearTimeout(ambient.timer);
+      ambient.timer = null;
+      ambient.steps = 0;
+      return;
+    }
+    ambient.lastSample = -Infinity;
+    scheduleLayoutRefresh();
+    scheduleColorRender();
+  }
+
+  function isWindowDragControl(target) {
+    return target instanceof Element && !!target.closest('button,input,select,label,summary,details,a,[contenteditable="true"],.top-tool-panel,.export-menu,.top-more-menu');
+  }
+
+  function canUseSmoothWindowDrag(event) {
+    return desktopAPI?.platform === 'win32' && event.button === 0 && document.body.classList.contains('video-playing') &&
+      !document.body.classList.contains('window-maximized') && !document.body.classList.contains('window-fullscreen') && !isWindowDragControl(event.target);
+  }
+
+  function flushSmoothWindowDrag() {
+    if (!smoothWindowDragGesture) return;
+    smoothWindowDragGesture.raf = null;
+    desktopAPI.moveWindowDrag(smoothWindowDragGesture.point);
+  }
+
+  function beginSmoothWindowDrag(event) {
+    if (!canUseSmoothWindowDrag(event)) return;
+    event.preventDefault();
+    const surface = event.currentTarget;
+    surface.setPointerCapture?.(event.pointerId);
+    smoothWindowDragGesture = { pointerId: event.pointerId, surface, point: { x: event.screenX, y: event.screenY }, raf: null };
+    setWindowInteraction(true);
+    desktopAPI.startWindowDrag(smoothWindowDragGesture.point);
+  }
+
+  function moveSmoothWindowDrag(event) {
+    const gesture = smoothWindowDragGesture;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    gesture.point = { x: event.screenX, y: event.screenY };
+    if (gesture.raf === null) gesture.raf = requestAnimationFrame(flushSmoothWindowDrag);
+  }
+
+  function endSmoothWindowDrag(event) {
+    const gesture = smoothWindowDragGesture;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    if (gesture.raf !== null) cancelAnimationFrame(gesture.raf);
+    gesture.point = Number.isFinite(event.screenX) && Number.isFinite(event.screenY) ? { x: event.screenX, y: event.screenY } : gesture.point;
+    desktopAPI.endWindowDrag(gesture.point);
+    gesture.surface.releasePointerCapture?.(gesture.pointerId);
+    smoothWindowDragGesture = null;
+    setWindowInteraction(false);
+  }
+
+  function bindSmoothWindowDrag(surface) {
+    if (!surface || !desktopAPI) return;
+    surface.addEventListener('pointerdown', beginSmoothWindowDrag);
+    surface.addEventListener('pointermove', moveSmoothWindowDrag);
+    surface.addEventListener('pointerup', endSmoothWindowDrag);
+    surface.addEventListener('pointercancel', endSmoothWindowDrag);
+    surface.addEventListener('dblclick', event => {
+      if (!canUseSmoothWindowDrag(event)) return;
+      event.preventDefault();
+      desktopAPI.toggleMaximizeWindow().catch(() => {});
+    });
+  }
+
   async function initializeDesktopRuntime() {
     if (!desktopAPI) return;
     document.body.classList.add('desktop-runtime');
     desktopAPI.onOpenVideo(openDesktopVideo);
     desktopAPI.onCommand(handleDesktopCommand);
     desktopAPI.onWindowState(applyDesktopWindowState);
+    desktopAPI.onWindowInteraction(setWindowInteraction);
     $('#clearRecentBtn').addEventListener('click', async () => { await desktopAPI.clearRecentVideos(); refreshRecentVideos(); });
     const versionPromise = desktopAPI.getVersion().catch(() => '0.8.7');
     const windowStatePromise = desktopAPI.getWindowState().catch(() => null);
@@ -2466,6 +2543,7 @@
 
   function handlePlaybackEnded() {
     els.playBtn.classList.remove('playing');
+    document.body.classList.remove('video-playing');
     stopPlaybackUiLoop();
     if (state.endBehavior === 'loop') {
       playback.currentTime = hasLoopRange() ? state.loopInFrame / state.fps : 0;
@@ -2498,8 +2576,8 @@
     playback.addEventListener('error',()=>{failMediaLoad();announceInitialMediaPresented(true);setStatus('视频载入失败');toast(playback.error?.message || '无法播放此视频，请检查编码格式');});
     playback.addEventListener('frame',()=>{presentLoadedMediaFrame();if(!state.timelineScrub&&!state.scrub&&!state.timelineSeek.inFlight)updateUI();if(!playback.requestVideoFrameCallback){captureFrame();scheduleColorRender();}});
     playback.addEventListener('frame',event=>{if(event.detail?.seeked)onResponsiveSeeked();});
-    playback.addEventListener('playing',()=>{state.timelineSeek.displayGate=false;state.timelineSeek.displayFrame=null;hideCachedFrame();els.playBtn.classList.add('playing');setStatus('播放中');startPlaybackUiLoop();revealCleanControls();});
-    playback.addEventListener('paused',()=>{els.playBtn.classList.remove('playing');stopPlaybackUiLoop();if(!state.isReverse)setStatus('已暂停');revealCleanControls();});
+    playback.addEventListener('playing',()=>{document.body.classList.add('video-playing');state.timelineSeek.displayGate=false;state.timelineSeek.displayFrame=null;hideCachedFrame();els.playBtn.classList.add('playing');setStatus('播放中');startPlaybackUiLoop();revealCleanControls();});
+    playback.addEventListener('paused',()=>{if(!state.isReverse)document.body.classList.remove('video-playing');els.playBtn.classList.remove('playing');stopPlaybackUiLoop();if(!state.isReverse)setStatus('已暂停');revealCleanControls();});
     playback.addEventListener('ended',handlePlaybackEnded);
     els.playBtn.addEventListener('click',()=>playback.paused&&!state.isReverse?play():pause());
     $('#jumpStartBtn').addEventListener('click',()=>seekFrame(0)); $('#stepBack5Btn').addEventListener('click',()=>step(-5));
@@ -2558,6 +2636,8 @@
     $$('#windowMinimizeBtn, #cleanWindowMinimizeBtn').forEach(button=>button.addEventListener('click',e=>{e.stopPropagation();desktopAPI?.minimizeWindow();}));
     $$('#windowMaximizeBtn, #cleanWindowMaximizeBtn').forEach(button=>button.addEventListener('click',e=>{e.stopPropagation();desktopAPI?.toggleMaximizeWindow();}));
     $$('#windowCloseBtn, #cleanWindowCloseBtn').forEach(button=>button.addEventListener('click',e=>{e.stopPropagation();desktopAPI?.closeWindow();}));
+    bindSmoothWindowDrag($('.topbar'));
+    bindSmoothWindowDrag($('.clean-drag-region'));
     $('#cleanModeBtn').addEventListener('click',()=>setCleanMode(!state.cleanMode));
     $('#cleanModeExitBtn').addEventListener('click',()=>setCleanMode(false));
     const volumeDisclosure = $('#volumeDisclosure');
