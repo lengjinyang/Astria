@@ -13,6 +13,11 @@ if (process.platform === 'win32') {
   // a control changes its pressed, focused, or open state.
   // Chromium reads this GPU workaround by its exact underscore-separated name.
   app.commandLine.appendSwitch('disable_direct_composition_video_overlays');
+  // Keep Chromium's compositor active while Windows is running a native
+  // move/resize loop. The player already owns its own visibility throttling.
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+  app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 }
 
 const formats = require('../media-formats.js');
@@ -33,7 +38,6 @@ let deferInitialWindowShow = false;
 let mainWindowReadyToShow = false;
 let initialMediaPresented = false;
 let initialShowFallback = null;
-let smoothWindowDrag = null;
 const isSmokeTest = process.argv.includes('--smoke-test');
 if (isSmokeTest) app.setPath('userData', path.resolve('.cache/desktop-smoke-profile'));
 
@@ -346,7 +350,7 @@ function createWindow() {
   let titlebarWasInside = false;
   let windowWasInside = null;
   const titlebarHoverTimer = setInterval(() => {
-    if (titlebarWindow.isDestroyed()) return;
+    if (titlebarWindow.isDestroyed() || windowInteractionActive) return;
     const bounds = titlebarWindow.getContentBounds();
     const cursor = screen.getCursorScreenPoint();
     const x = cursor.x - bounds.x, y = cursor.y - bounds.y;
@@ -364,7 +368,6 @@ function createWindow() {
   mainWindow.on('closed', () => {
     clearInterval(titlebarHoverTimer);
     clearTimeout(windowInteractionTimer);
-    smoothWindowDrag = null;
     if (initialShowFallback) clearTimeout(initialShowFallback);
     initialShowFallback = null;
     mainWindowReadyToShow = false;
@@ -406,24 +409,6 @@ function registerIpc() {
       fitCleanVideoWindow(mainWindow.getBounds().width + (videoWindowInsets.side - oldSide) * mainWindow.webContents.getZoomFactor());
     }
     return true;
-  });
-  const validWindowDrag = (event, point) => event.sender === mainWindow?.webContents &&
-    Number.isFinite(point?.x) && Number.isFinite(point?.y) && Math.abs(point.x) < 100000 && Math.abs(point.y) < 100000;
-  ipcMain.on('vfx:window-drag-start', (event, point) => {
-    if (!validWindowDrag(event, point) || mainWindow.isMaximized() || mainWindow.isFullScreen()) return;
-    const bounds = mainWindow.getBounds();
-    smoothWindowDrag = { offsetX: point.x - bounds.x, offsetY: point.y - bounds.y };
-  });
-  ipcMain.on('vfx:window-drag-move', (event, point) => {
-    if (!smoothWindowDrag || !validWindowDrag(event, point) || mainWindow.isDestroyed()) return;
-    mainWindow.setPosition(Math.round(point.x - smoothWindowDrag.offsetX), Math.round(point.y - smoothWindowDrag.offsetY), false);
-  });
-  ipcMain.on('vfx:window-drag-end', (event, point) => {
-    if (!validWindowDrag(event, point)) return;
-    if (smoothWindowDrag && mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.setPosition(Math.round(point.x - smoothWindowDrag.offsetX), Math.round(point.y - smoothWindowDrag.offsetY), false);
-    }
-    smoothWindowDrag = null;
   });
   ipcMain.handle('vfx:open-default-apps', async () => {
     if (process.platform !== 'win32') return false;
