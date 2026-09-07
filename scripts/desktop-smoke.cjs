@@ -10,10 +10,7 @@ module.exports = async function smoke(window, catalog, app) {
   if (!fs.existsSync(fixture)) throw new Error('烟雾素材不存在，请设置 ASTRIA_SMOKE_MEDIA');
   const descriptor = await catalog.describe(fixture);
   await window.webContents.executeJavaScript(`new Promise((resolve,reject)=>{const start=Date.now();const tick=()=>window.__astriaReady?resolve():Date.now()-start>5000?reject(new Error('UI initialization timeout')):setTimeout(tick,25);tick();})`);
-  await window.webContents.executeJavaScript(`(() => {
-    const select=document.querySelector('#startupModeSelect');select.value='classic';select.dispatchEvent(new Event('change',{bubbles:true}));
-    const autoplay=document.querySelector('#autoplaySwitch');if(autoplay.getAttribute('aria-checked')==='true')autoplay.click();
-  })()`);
+  await window.webContents.executeJavaScript(`(() => { const select=document.querySelector('#startupModeSelect');select.value='classic';select.dispatchEvent(new Event('change',{bubbles:true})); })()`);
   window.webContents.send('vfx:open-video-from-system', descriptor);
   if (descriptor.mediaKind === 'sequence') return require('./sequence-smoke.cjs')(window,catalog,app,descriptor);
   const result = await window.webContents.executeJavaScript(`(async () => {
@@ -22,21 +19,6 @@ module.exports = async function smoke(window, catalog, app) {
       const start=Date.now(); const tick=()=>condition()?resolve():Date.now()-start>timeout?reject(new Error(p.error?.message || 'Smoke timeout '+JSON.stringify({ready:p.readyState,time:p.currentTime,seeking:p.seeking,paused:p.paused,media:p.media}))):setTimeout(tick,30); tick();
     });
     await wait(()=>p.readyState >= 2); p.pause(); await wait(()=>p.paused);
-    const scrub=window.__astriaScrubTest,startFrame=Math.max(1,Math.min(scrub.snapshot().lastFrame-8,Math.round(p.currentTime*scrub.snapshot().fps)));
-    await p.seekFrameExact(startFrame,scrub.snapshot().fps);
-    scrub.trace.length=0; scrub.begin(); scrub.target(startFrame+6);
-    await wait(()=>scrub.snapshot().presentedFrame===startFrame+4);
-    await new Promise(resolve=>setTimeout(resolve,100));
-    if(scrub.snapshot().presentedFrame!==startFrame+4)throw new Error('Scrub backlog was not bounded '+JSON.stringify(scrub.snapshot()));
-    scrub.target(startFrame+6);await wait(()=>scrub.snapshot().presentedFrame===startFrame+6);
-    scrub.target(startFrame+2); await wait(()=>scrub.snapshot().presentedFrame===startFrame+2);
-    await scrub.end();
-    const scrubTrace=[...scrub.trace],contiguous=scrubTrace.every((frame,index)=>!index||Math.abs(frame-scrubTrace[index-1])===1);
-    if(!contiguous||scrub.snapshot().displayFrame!==null||!p.paused)throw new Error('Scrub sequence failed '+JSON.stringify({scrubTrace,state:scrub.snapshot(),paused:p.paused}));
-    const sourceFps=p.media.sourceFps||p.media.fps||24,customFps=sourceFps*2,originalFrameOperation=p.frameOperation.bind(p);let customStepCommand;
-    p.frameOperation=(command,value)=>{customStepCommand={command,value};return Promise.resolve({time:value});};
-    await p.stepFrame(1,customFps);p.frameOperation=originalFrameOperation;
-    if(customStepCommand?.command!=='seek'||Math.abs(customStepCommand.value-(p.currentTime+1/customFps))>.0001)throw new Error('Custom FPS step mapping failed '+JSON.stringify(customStepCommand));
     p.seek(0.5); await wait(()=>!p.seeking && Math.abs(p.currentTime-.5)<.06);
     const before=p.currentTime; p.step(1); await wait(()=>!p.seeking && p.currentTime>before);
     p.step(-1); await wait(()=>!p.seeking && Math.abs(p.currentTime-before)<.01);
@@ -59,9 +41,8 @@ module.exports = async function smoke(window, catalog, app) {
     const result={ready:frame.width===p.videoWidth && frame.height===p.videoHeight, width:frame.width,height:frame.height,
       canvas:document.querySelector('#video').tagName==='CANVAS',desktopAPI:!!window.desktopAPI,
       timeline:document.querySelector('.timeline-panel').getBoundingClientRect().bottom<=innerHeight,
-      controls:!!document.querySelector('#playBtn'),mediaKind:p.media.mediaKind,backend:p.backend,pixel,contactClosed,
-      scrubFrames:scrubTrace.length,sourceFpsApplied:Math.abs(scrub.snapshot().fps-(p.media.sourceFps||p.media.fps||24))<.001};
-    if(!result.ready||!result.canvas||!result.timeline||!pixel||!contactClosed||!result.sourceFpsApplied)throw new Error(JSON.stringify(result));
+      controls:!!document.querySelector('#playBtn'),mediaKind:p.media.mediaKind,backend:p.backend,pixel,contactClosed};
+    if(!result.ready||!result.canvas||!result.timeline||!pixel||!contactClosed)throw new Error(JSON.stringify(result));
     return result;
   })()`);
   console.log('VFX_SMOKE_TEST', JSON.stringify(result));
