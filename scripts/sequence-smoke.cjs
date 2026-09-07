@@ -4,13 +4,15 @@ module.exports=async function sequenceSmoke(window,catalog,app,descriptor){
     const p=window.__astriaPlayback;
     const wait=condition=>new Promise((resolve,reject)=>{const start=Date.now();const tick=()=>condition()?resolve():Date.now()-start>8000?reject(new Error(p.error?.message||('Sequence timeout '+JSON.stringify({time:p.currentTime,ready:p.readyState,seeking:p.seeking,paused:p.paused,fps:p.media?.fps,frames:p.media?.totalFrames,duration:p.duration})))):setTimeout(tick,20);tick();});
     await wait(()=>p.readyState>=2);p.pause();await wait(()=>p.paused);
+    const fps=document.querySelector('#fpsInput');fps.value='24';fps.dispatchEvent(new Event('change',{bubbles:true}));
+    await wait(()=>p.media.fps===24&&p.readyState>=2&&!p.seeking&&p.paused);
     p.seek(1/24);await wait(()=>!p.seeking&&Math.abs(p.currentTime-1/24)<.001);
     const valid=(await p.captureFrame()).toDataURL();
     p.seek(2/24);await wait(()=>!p.seeking&&Math.abs(p.currentTime-2/24)<.001);
     const missing=(await p.captureFrame()).toDataURL();
     if(valid!==missing||!document.querySelector('.missing-frame-notice').textContent.includes('1003'))throw Error('Missing-frame hold failed');
     document.querySelector('#addBookmarkBtn').click();
-    const fps=document.querySelector('#fpsInput');fps.value='48';fps.dispatchEvent(new Event('change',{bubbles:true}));
+    fps.value='48';fps.dispatchEvent(new Event('change',{bubbles:true}));
     await wait(()=>p.media.fps===48&&p.readyState>=2&&!p.seeking);
     if(!p.paused||Math.abs(p.duration-4/48)>.001)throw Error('FPS mapping or pause preservation failed');
     await new Promise(resolve=>setTimeout(resolve,600));

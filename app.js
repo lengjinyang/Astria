@@ -44,11 +44,11 @@
   els.video = playback.surface;
   els.videoInput.accept = (desktopAPI ? AstriaFormats.selectable : AstriaFormats.browser).map(ext => '.' + ext).join(',');
   const state = {
-    fileName: '', fileMeta: null, fps: 24, fpsMode: 'source', bookmarks: [], annotations: [], selectedBookmarkIds: [],
+    fileName: '', fileMeta: null, fps: 24, fpsMode: 'source', fpsModeExplicit: false, bookmarks: [], annotations: [], selectedBookmarkIds: [],
     selectedAnnotationId: null, selectedAnnotationFrame: null, activeTool: 'select', annotationColor: '#8b5cf6', annotationVisible: true,
     timelineZoom: 1, reverseTimer: null, reverseSeekInFlight: false, reverseAnchorFrame: 0, reverseAnchorTime: 0, reverseFrame: 0, playbackUiRaf: null, isReverse: false, scrub: null, draw: null, favoriteOnly: false,
     view: 'list', autosave: true, currentObjectUrl: null, saveTimer: null, contextBookmarkId: null,
-    timelineScrub: null, timelineSeek: { targetFrame: null, inFlightFrame: null, inFlight: false }, annotationScope: 'all',
+    timelineScrub: null, timelineSeek: { pendingFrame: null, inFlight: false }, annotationScope: 'all',
     lumaMode: false, lumaContrast: 1, viewerScrubSensitivity: 0.3, lastFrameContent: null,
     volume: 1, muted: false, previousVolume: 1, loopInFrame: null, loopOutFrame: null,
     frameCache: new Map(), frameCacheCapture: null, frameCachePending: false, frameCacheHandle: null,
@@ -508,8 +508,7 @@
     const startFrame = Math.round(playback.currentTime * state.fps);
     playback.pause();
     stopReverse();
-    state.timelineSeek.targetFrame = null;
-    state.timelineSeek.inFlightFrame = null;
+    state.timelineSeek.pendingFrame = null;
     state.timelineSeek.inFlight = false;
     state.isReverse = true;
     revealCleanControls();
@@ -1636,7 +1635,7 @@
   }
 
   function workspaceData() {
-    return { version: '0.7', mediaKind: state.fileMeta?.mediaKind || 'video', sourceFrameOffset: state.fileMeta?.sourceFrameOffset || 0, sequence: state.fileMeta?.sequence || null, fileMeta: state.fileMeta, fps: state.fps, fpsMode: state.fpsMode, bookmarks: state.bookmarks, annotations: state.annotations, annotationThumbnails: state.annotationThumbnails, timelineZoom: state.timelineZoom, loopInFrame: state.loopInFrame, loopOutFrame: state.loopOutFrame, colorPreset: state.colorPreset, updatedAt: new Date().toISOString() };
+    return { version: '0.8', mediaKind: state.fileMeta?.mediaKind || 'video', sourceFrameOffset: state.fileMeta?.sourceFrameOffset || 0, sequence: state.fileMeta?.sequence || null, fileMeta: state.fileMeta, fps: state.fps, fpsMode: state.fpsMode, fpsModeExplicit: state.fpsModeExplicit, bookmarks: state.bookmarks, annotations: state.annotations, annotationThumbnails: state.annotationThumbnails, timelineZoom: state.timelineZoom, loopInFrame: state.loopInFrame, loopOutFrame: state.loopOutFrame, colorPreset: state.colorPreset, updatedAt: new Date().toISOString() };
   }
 
   function legacyMediaKey(meta) {
@@ -1711,8 +1710,10 @@
         syncDesktopAppData(library);
       }
     }
-    state.fpsMode = saved ? (saved.fpsMode === 'source' ? 'source' : 'custom') : (meta?.mediaKind === 'video' ? 'source' : 'custom');
-    state.fps = Number(saved?.fps) || Number(meta?.sourceFps || meta?.fps) || 24;
+    const explicitCustomFps = meta?.mediaKind !== 'video' || (saved?.fpsMode === 'custom' && saved?.fpsModeExplicit === true);
+    state.fpsMode = explicitCustomFps ? 'custom' : 'source';
+    state.fpsModeExplicit = explicitCustomFps;
+    state.fps = state.fpsMode === 'source' ? Number(meta?.sourceFps || meta?.fps) || 24 : Number(saved?.fps) || 24;
     state.bookmarks = saved?.bookmarks || [];
     state.annotations = saved?.annotations || [];
     state.annotationThumbnails = saved?.annotationThumbnails && typeof saved.annotationThumbnails === 'object' ? saved.annotationThumbnails : {};
@@ -2043,32 +2044,25 @@
 
   function queueResponsiveSeek(frame) {
     const targetFrame = clamp(Math.round(frame), 0, totalFrames());
-    state.timelineSeek.targetFrame = targetFrame;
-    showCachedFrame(targetFrame, true);
+    state.timelineSeek.pendingFrame = targetFrame;
+    showCachedFrame(targetFrame);
     updatePlaybackUI(targetFrame / state.fps, targetFrame);
     pumpResponsiveSeek();
   }
 
   function pumpResponsiveSeek() {
     const controller = state.timelineSeek;
-    if (controller.inFlight || controller.targetFrame === null || !playback.duration) return;
-    const current = clamp(Math.round(playback.currentTime * state.fps), 0, totalFrames());
-    const target = controller.targetFrame;
-    if (current === target) { controller.targetFrame = null; updateUI(true); return; }
-    const distance = target - current;
-    const frame = Math.abs(distance) <= 6 ? current + Math.sign(distance) : target;
+    if (controller.inFlight || controller.pendingFrame === null || !playback.duration) return;
+    const frame = controller.pendingFrame;
+    controller.pendingFrame = null;
     const targetTime = frame / state.fps;
     if (Math.abs(playback.currentTime - targetTime) < frameDuration() * .2) {
-      if (frame === target) controller.targetFrame = null;
-      if (controller.targetFrame !== null) pumpResponsiveSeek();
+      if (controller.pendingFrame !== null) pumpResponsiveSeek();
       else if (!state.timelineScrub && !state.scrub) updateUI(true);
       return;
     }
-    controller.inFlight = true; controller.inFlightFrame = frame;
-    const sourceFps = Number(playback.media?.sourceFps || playback.media?.fps);
-    if (Math.abs(distance) <= 6 && Math.abs(frame - current) === 1 &&
-        (playback.media?.mediaKind === 'sequence' || !sourceFps || Math.abs(sourceFps - state.fps) < .001)) playback.step(Math.sign(distance));
-    else playback.currentTime = targetTime;
+    controller.inFlight = true;
+    playback.currentTime = targetTime;
   }
 
   function onResponsiveSeeked() {
@@ -2087,10 +2081,8 @@
       return;
     }
     if (!controller.inFlight) { updateUI(true); return; }
-    controller.inFlight = false; controller.inFlightFrame = null;
-    const actualFrame = clamp(Math.round(playback.currentTime * state.fps), 0, totalFrames());
-    if (controller.targetFrame === actualFrame) controller.targetFrame = null;
-    if (controller.targetFrame !== null) {
+    controller.inFlight = false;
+    if (controller.pendingFrame !== null) {
       state.lastFrameContent = currentFrame();
       drawAnnotations();
       pumpResponsiveSeek();
@@ -2393,7 +2385,7 @@
       toast(`下次启动默认使用${state.startupMode === 'clean' ? '纯净模式' : '经典模式'}`);
     });
     els.endBehaviorSelect.addEventListener('change',e=>{state.endBehavior=e.target.value;persistPreferences();toast(({stop:'播放结束后停在最后一帧',rewind:'播放结束后返回第一帧',loop:'已开启循环播放'})[state.endBehavior]);});
-    els.fpsInput.addEventListener('change',()=>{state.fps=clamp(Number(els.fpsInput.value)||24,1,240);state.fpsMode='custom';playback.setProjectFps(state.fps);clearFrameCache();disposeTimelinePreview();state.bookmarks.forEach(b=>b.timestamp=b.frame/state.fps);els.fpsInput.value=state.fps;$('#hudFps').textContent=`${state.fps} FPS`;$('#propFps').textContent=`${state.fps} fps`;$('#propFrames').textContent=totalFrames().toLocaleString();renderBookmarks();renderTimeline();saveWorkspace();});
+    els.fpsInput.addEventListener('change',()=>{state.fps=clamp(Number(els.fpsInput.value)||24,1,240);state.fpsMode='custom';state.fpsModeExplicit=true;playback.setProjectFps(state.fps);clearFrameCache();disposeTimelinePreview();state.bookmarks.forEach(b=>b.timestamp=b.frame/state.fps);els.fpsInput.value=state.fps;$('#hudFps').textContent=`${state.fps} FPS`;$('#propFps').textContent=`${state.fps} fps`;$('#propFrames').textContent=totalFrames().toLocaleString();renderBookmarks();renderTimeline();saveWorkspace();});
     els.muteBtn.addEventListener('click',()=>{
       if (playback.muted || playback.volume === 0) {
         if (playback.volume === 0) playback.volume = state.previousVolume || 1;
@@ -2696,11 +2688,5 @@
 
   await loadWorkspace(); void preloadBuiltInColorLuts(); bindEvents(); setMediaReady(false); renderBookmarks(); renderAnnotationList(); syncNotes(); updateUI();
   await initializeDesktopRuntime();
-  if (window.__astriaPlayback) {
-    window.__astriaResponsiveSeekTest = {
-      seek: queueResponsiveSeek,
-      snapshot: () => ({ ...state.timelineSeek, frame: currentFrame(), fps: state.fps })
-    };
-    window.__astriaReady = true;
-  }
+  if (window.__astriaPlayback) window.__astriaReady = true;
 })();

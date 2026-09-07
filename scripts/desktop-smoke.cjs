@@ -20,11 +20,6 @@ module.exports = async function smoke(window, catalog, app) {
     });
     await wait(()=>p.readyState >= 2); p.pause(); await wait(()=>p.paused);
     p.seek(0.5); await wait(()=>!p.seeking && Math.abs(p.currentTime-.5)<.06);
-    const scrub=window.__astriaResponsiveSeekTest,startFrame=Math.round(p.currentTime*scrub.snapshot().fps),scrubTrace=[];
-    const traceFrame=()=>{const frame=Math.round(p.currentTime*scrub.snapshot().fps);if(scrubTrace.at(-1)!==frame)scrubTrace.push(frame);};
-    p.addEventListener('frame',traceFrame);scrub.seek(startFrame+4);
-    await wait(()=>scrub.snapshot().targetFrame===null&&!scrub.snapshot().inFlight);p.removeEventListener('frame',traceFrame);
-    if(scrubTrace.length<4||scrubTrace.some((frame,index)=>index&&frame-scrubTrace[index-1]!==1))throw new Error('Responsive scrub skipped nearby frames '+JSON.stringify(scrubTrace));
     const before=p.currentTime; p.step(1); await wait(()=>!p.seeking && p.currentTime>before);
     p.step(-1); await wait(()=>!p.seeking && Math.abs(p.currentTime-before)<.01);
     p.playbackRate=1.5; p.volume=.4; p.muted=true;
@@ -46,8 +41,9 @@ module.exports = async function smoke(window, catalog, app) {
     const result={ready:frame.width===p.videoWidth && frame.height===p.videoHeight, width:frame.width,height:frame.height,
       canvas:document.querySelector('#video').tagName==='CANVAS',desktopAPI:!!window.desktopAPI,
       timeline:document.querySelector('.timeline-panel').getBoundingClientRect().bottom<=innerHeight,
-      controls:!!document.querySelector('#playBtn'),mediaKind:p.media.mediaKind,backend:p.backend,pixel,contactClosed};
-    if(!result.ready||!result.canvas||!result.timeline||!pixel||!contactClosed)throw new Error(JSON.stringify(result));
+      controls:!!document.querySelector('#playBtn'),mediaKind:p.media.mediaKind,backend:p.backend,pixel,contactClosed,
+      sourceFpsApplied:Math.abs(Number(document.querySelector('#fpsInput').value)-(p.media.sourceFps||p.media.fps||24))<.001};
+    if(!result.ready||!result.canvas||!result.timeline||!pixel||!contactClosed||!result.sourceFpsApplied)throw new Error(JSON.stringify(result));
     return result;
   })()`);
   console.log('VFX_SMOKE_TEST', JSON.stringify(result));
