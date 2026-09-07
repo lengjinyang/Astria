@@ -24,8 +24,10 @@ module.exports = async function smoke(window, catalog, app) {
     scrub.trace.length=0;scrub.seek(startFrame+2);scrub.seek(startFrame+6);
     await wait(()=>!scrub.snapshot().inFlight&&scrub.snapshot().pendingFrame===null);
     if(!scrub.trace.includes(startFrame+2)||scrub.trace.at(-1)!==startFrame+6)throw new Error('Scrub overlay did not update while dragging '+JSON.stringify(scrub.trace));
-    const before=p.currentTime; p.step(1); await wait(()=>!p.seeking && p.currentTime>before);
-    p.step(-1); await wait(()=>!p.seeking && Math.abs(p.currentTime-before)<.01);
+    const before=p.currentTime; let playedDuringStep=false; const markStepPlay=()=>{playedDuringStep=true};p.addEventListener('playing',markStepPlay);
+    p.step(1); await wait(()=>!p.seeking && p.currentTime>before);
+    p.step(-1); await wait(()=>!p.seeking && Math.abs(p.currentTime-before)<.01);await new Promise(resolve=>setTimeout(resolve,80));p.removeEventListener('playing',markStepPlay);
+    if(playedDuringStep||!p.paused||document.querySelector('#playBtn').classList.contains('playing'))throw new Error('Frame step exposed transient playback state');
     p.playbackRate=1.5; p.volume=.4; p.muted=true;
     await p.play(); await wait(()=>!p.paused); p.pause(); await wait(()=>p.paused);
     const frame=await p.captureFrame();

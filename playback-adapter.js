@@ -88,6 +88,10 @@
         if (event.seeked) { this.seeking = false; this.emit('seeked'); }
         const callbacks = [...this.callbacks.values()]; this.callbacks.clear();
         for (const callback of callbacks) callback(performance.now(), { mediaTime: this.time });
+      } else if (event.type === 'playing' && this.stepping) {
+        // libmpv briefly unpauses internally to present a frame-step. Keep the
+        // public paused state stable until the user explicitly starts playback.
+        return;
       } else if (event.type === 'playing' || event.type === 'paused') {
         this.paused = event.type === 'paused'; this.emit(event.type); this.emit(this.paused ? 'pause' : 'play');
       } else if (event.type === 'error') this.fail(new Error(event.message));
@@ -133,10 +137,10 @@
       if (this.finishSourceFrame(frame, this.upload.canvas)) return;
       this.presenter.draw(this.upload.canvas);
     }
-    play() { this.stopReverse(); return this.call('play'); }
+    play() { this.stopReverse(); this.stepping = false; return this.call('play'); }
     pause() { this.stopReverse(); if (this.session) this.fire('pause'); }
     seek(time) { this.seeking = true; this.fire('seek', time); }
-    step(direction) { this.pause(); this.seeking = true; this.fire('step', direction); }
+    step(direction) { this.pause(); this.stepping = true; this.seeking = true; this.fire('step', direction); }
     setSpeed(value) { this._speed = value; if (this.session) this.fire('setSpeed', value); }
     setVolume(value) { this._volume = value; if (this.session) this.fire('setVolume', value); }
     setMuted(value) { this._muted = value; if (this.session) this.fire('setMuted', value); }
