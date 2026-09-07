@@ -48,7 +48,7 @@
     selectedAnnotationId: null, selectedAnnotationFrame: null, activeTool: 'select', annotationColor: '#8b5cf6', annotationVisible: true,
     timelineZoom: 1, reverseTimer: null, reverseSeekInFlight: false, reverseAnchorFrame: 0, reverseAnchorTime: 0, reverseFrame: 0, playbackUiRaf: null, isReverse: false, scrub: null, draw: null, favoriteOnly: false,
     view: 'list', autosave: true, currentObjectUrl: null, saveTimer: null, contextBookmarkId: null,
-    timelineScrub: null, timelineSeek: { pendingFrame: null, inFlight: false }, annotationScope: 'all',
+    timelineScrub: null, timelineSeek: { pendingFrame: null, inFlight: false, displayGate: false }, annotationScope: 'all',
     lumaMode: false, lumaContrast: 1, viewerScrubSensitivity: 0.3, lastFrameContent: null,
     volume: 1, muted: false, previousVolume: 1, loopInFrame: null, loopOutFrame: null,
     frameCache: new Map(), frameCacheCapture: null, frameCachePending: false, frameCacheHandle: null,
@@ -72,11 +72,12 @@
   const uid = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
   const frameDuration = () => 1 / Math.max(1, state.fps);
-  const currentFrame = () => state.isReverse ? Math.round(state.reverseFrame) : Math.round(playback.currentTime * state.fps);
+  const totalFrames = () => playback.media?.mediaKind === 'sequence' ? playback.media.totalFrames : Math.max(1, Math.round((playback.duration || 0) * state.fps));
+  const lastFrame = () => Math.max(0, totalFrames() - 1);
+  const currentFrame = () => clamp(state.isReverse ? Math.round(state.reverseFrame) : Math.round(playback.currentTime * state.fps), 0, lastFrame());
   const sourceFrame = frame => Math.round(frame) + (state.fileMeta?.sourceFrameOffset || 0);
   const missingFrameNotice = document.createElement('div');
   missingFrameNotice.className = 'missing-frame-notice'; missingFrameNotice.hidden = true; els.mediaSurface.appendChild(missingFrameNotice);
-  const totalFrames = () => playback.media?.mediaKind === 'sequence' ? playback.media.totalFrames : Math.round((playback.duration || 0) * state.fps);
   const selectedBookmark = () => state.bookmarks.find(b => state.selectedBookmarkIds.includes(b.id));
 
   function formatTimecode(seconds) {
@@ -639,6 +640,7 @@
 
   function clearFrameCache() {
     state.frameCacheGeneration += 1;
+    state.timelineSeek.displayGate = false;
     if (state.frameCacheHandle !== null && playback.cancelVideoFrameCallback) playback.cancelVideoFrameCallback(state.frameCacheHandle);
     state.frameCacheHandle = null;
     state.frameCachePending = false;
@@ -722,6 +724,26 @@
     scheduleColorRender();
     els.cacheStatus.classList.remove('hit');
     updateCacheStatus();
+  }
+
+  function showPlaybackFrameOverlay() {
+    if (playback.readyState < 2 || !playback.videoWidth || !playback.currentFrameCanvas) return false;
+    const source = playback.currentFrameCanvas;
+    const sourceWidth = source.width || playback.videoWidth, sourceHeight = source.height || playback.videoHeight;
+    const scale = Math.min(1, 960 / sourceWidth, 540 / sourceHeight);
+    const width = Math.max(2, Math.round(sourceWidth * scale)), height = Math.max(2, Math.round(sourceHeight * scale));
+    if (els.cacheCanvas.width !== width || els.cacheCanvas.height !== height) { els.cacheCanvas.width = width; els.cacheCanvas.height = height; }
+    els.cacheCtx.drawImage(source, 0, 0, width, height);
+    els.cacheCanvas.classList.add('visible');
+    state.timelineSeek.displayGate = true;
+    scheduleColorRender();
+    return true;
+  }
+
+  function releaseResponsiveSeekDisplay() {
+    if (state.timelineSeek.inFlight || state.timelineSeek.pendingFrame !== null || state.timelineScrub || state.scrub || state.quickGesture?.tool === 'select') return;
+    state.timelineSeek.displayGate = false;
+    hideCachedFrame();
   }
 
   function startFrameCacheLoop() {
@@ -1463,7 +1485,7 @@
     if (!gesture || e.pointerId !== gesture.pointerId) return;
     state.quickGesture = null;
     if (!gesture.drawing) { showAnnotationRadialMenu(e.clientX, e.clientY); return; }
-    if (gesture.tool === 'select') { updateUI(true); return; }
+    if (gesture.tool === 'select') { updateUI(true); releaseResponsiveSeekDisplay(); return; }
     if (gesture.tool === 'eraser') {
       if (gesture.erasedCount) { refreshAnnotationUI(); toast(`已擦除 ${gesture.erasedCount} 个批注内容`); }
       else drawAnnotations();
@@ -2012,7 +2034,7 @@
   function seekTimelineAt(clientX) {
     if (!playback.duration) return;
     const rect = els.timelineTrack.getBoundingClientRect();
-    const frame = Math.round(clamp((clientX - rect.left) / rect.width, 0, 1) * totalFrames());
+    const frame = Math.round(clamp((clientX - rect.left) / rect.width, 0, 1) * lastFrame());
     if (state.timelineScrub?.lastFrame === frame) return;
     if (state.timelineScrub) state.timelineScrub.lastFrame = frame;
     queueResponsiveSeek(frame);
@@ -2043,9 +2065,9 @@
   }
 
   function queueResponsiveSeek(frame) {
-    const targetFrame = clamp(Math.round(frame), 0, totalFrames());
+    const targetFrame = clamp(Math.round(frame), 0, lastFrame());
+    if (!state.timelineSeek.displayGate) showPlaybackFrameOverlay();
     state.timelineSeek.pendingFrame = targetFrame;
-    showCachedFrame(targetFrame);
     updatePlaybackUI(targetFrame / state.fps, targetFrame);
     pumpResponsiveSeek();
   }
@@ -2067,7 +2089,8 @@
 
   function onResponsiveSeeked() {
     const controller = state.timelineSeek;
-    hideCachedFrame(); captureFrame(); scheduleColorRender();
+    if (controller.inFlight && controller.pendingFrame === null) showPlaybackFrameOverlay();
+    captureFrame(); scheduleColorRender();
     if (state.annotations.some(annotation => annotation.frame === currentFrame()) && !state.annotationThumbnails[currentFrame()]) {
       updateAnnotationThumbnail(currentFrame()); renderAnnotationList(); saveWorkspace();
     }
@@ -2087,7 +2110,7 @@
       drawAnnotations();
       pumpResponsiveSeek();
     }
-    else updateUI(true);
+    else { updateUI(true); releaseResponsiveSeekDisplay(); }
   }
 
   function beginTimelineScrub(e) {
@@ -2119,6 +2142,7 @@
     els.ruler.classList.remove('scrubbing');
     if (scrub.wasReverse) reverse();
     else if (scrub.wasPlaying) play();
+    else releaseResponsiveSeekDisplay();
   }
 
   function cancelTimelineScrub(pointerId) {
@@ -2130,6 +2154,7 @@
     els.ruler.classList.remove('scrubbing');
     if (scrub.wasReverse) reverse();
     else if (scrub.wasPlaying) play();
+    else releaseResponsiveSeekDisplay();
   }
 
   function beginScrub(e) {
@@ -2154,7 +2179,7 @@
     e.preventDefault();
     const factor=e.altKey?1:(e.shiftKey?state.viewerScrubSensitivity*.2:state.viewerScrubSensitivity);
     const next=Math.round(state.scrub.startFrame+px*factor);
-    state.scrub.lastFrame=clamp(next,0,totalFrames()); queueResponsiveSeek(state.scrub.lastFrame);
+    state.scrub.lastFrame=clamp(next,0,lastFrame()); queueResponsiveSeek(state.scrub.lastFrame);
   }
 
   function endScrub(e) {
@@ -2165,6 +2190,7 @@
     if (wasDragging) {
       if (wasReverse) reverse();
       else if (wasPlaying) play();
+      else releaseResponsiveSeekDisplay();
     } else if (e?.type !== 'pointercancel') {
       playback.paused&&!state.isReverse?play():pause();
       scheduleCleanControlsHide();
