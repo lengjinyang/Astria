@@ -25,6 +25,7 @@ const { MediaCatalog } = require('./media-catalog.cjs');
 const { MediaService } = require('./media-service.cjs');
 const VIDEO_EXTENSIONS = new Set(formats.selectable.map(ext => '.' + ext));
 let catalog, mediaService;
+let catalogReady = Promise.resolve();
 const MIME_BY_EXTENSION = {
   '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mov': 'video/quicktime',
   '.webm': 'video/webm', '.ogv': 'video/ogg', '.ogg': 'video/ogg',
@@ -38,6 +39,7 @@ let deferInitialWindowShow = false;
 let mainWindowReadyToShow = false;
 let initialMediaPresented = false;
 let initialShowFallback = null;
+let manualWindowResize = null;
 const isSmokeTest = process.argv.includes('--smoke-test');
 if (isSmokeTest) app.setPath('userData', path.resolve('.cache/desktop-smoke-profile'));
 
@@ -130,7 +132,7 @@ function findMediaArgument(argv) {
 
 async function describeVideo(filePath) {
   if (!filePath) return null;
-  try { return await catalog.describe(filePath); }
+  try { await catalogReady; return await catalog.describe(filePath); }
   catch (error) { console.warn('Unable to open local media:', error.message); return null; }
 }
 
@@ -272,9 +274,11 @@ function fitCleanVideoWindow(requestedWidth) {
 }
 
 function createWindow() {
-  deferInitialWindowShow = !isSmokeTest && Boolean(pendingLaunchPath);
+  // Show the stable shell as soon as Chromium is ready. Media presentation is
+  // independent, so launching with a file no longer hides the app until decode.
+  deferInitialWindowShow = false;
   mainWindowReadyToShow = false;
-  initialMediaPresented = !deferInitialWindowShow;
+  initialMediaPresented = true;
   mainWindow = new BrowserWindow({
     width: 1500,
     height: 940,
@@ -285,7 +289,9 @@ function createWindow() {
     icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
     title: 'Astria',
     frame: process.platform !== 'win32',
-    roundedCorners: true,
+    roundedCorners: false,
+    hasShadow: process.platform !== 'win32',
+    thickFrame: process.platform !== 'win32',
     autoHideMenuBar: process.platform !== 'darwin',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -371,6 +377,7 @@ function createWindow() {
     titlebarWasInside = inside;
   }, 40);
   mainWindow.on('closed', () => {
+    manualWindowResize = null;
     clearInterval(titlebarHoverTimer);
     clearTimeout(windowInteractionTimer);
     if (initialShowFallback) clearTimeout(initialShowFallback);
@@ -425,6 +432,33 @@ function registerIpc() {
     if (!mainWindow || mainWindow.isDestroyed()) return getWindowState();
     if (mainWindow.isMaximized()) mainWindow.unmaximize(); else mainWindow.maximize();
     return getWindowState();
+  });
+  ipcMain.on('vfx:window-resize-begin', (event, edge, point) => {
+    const allowedEdges = new Set(['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw']);
+    if (process.platform !== 'win32' || event.sender !== mainWindow?.webContents || !allowedEdges.has(edge) ||
+        mainWindow.isMaximized() || mainWindow.isFullScreen() || !Number.isFinite(point?.x) || !Number.isFinite(point?.y)) return;
+    manualWindowResize = { edge, point: { x: point.x, y: point.y }, bounds: mainWindow.getBounds() };
+  });
+  ipcMain.on('vfx:window-resize-update', (event, point) => {
+    if (event.sender !== mainWindow?.webContents || !manualWindowResize || !Number.isFinite(point?.x) || !Number.isFinite(point?.y)) return;
+    const { edge, point: start, bounds } = manualWindowResize;
+    const [minimumWidth, minimumHeight] = mainWindow.getMinimumSize();
+    const dx = point.x - start.x, dy = point.y - start.y;
+    const next = { ...bounds };
+    if (edge.includes('e')) next.width = Math.max(minimumWidth, Math.round(bounds.width + dx));
+    if (edge.includes('s')) next.height = Math.max(minimumHeight, Math.round(bounds.height + dy));
+    if (edge.includes('w')) {
+      next.width = Math.max(minimumWidth, Math.round(bounds.width - dx));
+      next.x = bounds.x + bounds.width - next.width;
+    }
+    if (edge.includes('n')) {
+      next.height = Math.max(minimumHeight, Math.round(bounds.height - dy));
+      next.y = bounds.y + bounds.height - next.height;
+    }
+    mainWindow.setBounds(next);
+  });
+  ipcMain.on('vfx:window-resize-end', event => {
+    if (event.sender === mainWindow?.webContents) manualWindowResize = null;
   });
   ipcMain.handle('vfx:window-close', () => { mainWindow?.close(); return true; });
   ipcMain.handle('vfx:toggle-fullscreen', () => {
@@ -526,7 +560,8 @@ if (!hasSingleInstanceLock) {
     }
     store = new DesktopStore(storePath);
     catalog = new MediaCatalog(path.join(app.getPath('cache'), 'Astria', 'sequences'));
-    await catalog.initialize();
+    catalogReady = catalog.initialize();
+    void catalogReady.catch(error => console.warn('Unable to initialize sequence cache:', error.message));
     mediaService = new MediaService(app, catalog, () => mainWindow);
     registerIpc();
     rebuildMenu();
@@ -537,7 +572,9 @@ if (!hasSingleInstanceLock) {
   let quitting = false;
   app.on('before-quit', event => {
     if (quitting) return; event.preventDefault(); quitting = true;
-    Promise.resolve(mediaService?.dispose()).then(() => catalog?.dispose()).finally(() => app.quit());
+    Promise.resolve(mediaService?.dispose())
+      .then(async () => { try { await catalogReady; } catch { /* initialization failure must not block exit */ } return catalog?.dispose(); })
+      .finally(() => app.quit());
   });
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 }

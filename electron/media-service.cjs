@@ -11,13 +11,7 @@ function runtimePath(app) {
 }
 function loadCore(app) {
   try {
-    const core = require(path.join(runtimePath(app), 'astria_mpv.node'));
-    const probe = new core.MpvPlayer({ mode: 'software' });
-    try {
-      const version = probe.getInfo()['mpv-version'];
-      if (!/^mpv (?:v)?0\.41\.0(?:\s|$)/.test(version || '')) throw new Error(`需要 mpv 0.41.0，实际为 ${version}`);
-    } finally { probe.destroy(); }
-    return core;
+    return require(path.join(runtimePath(app), 'astria_mpv.node'));
   } catch (error) { throw new Error(`播放核心缺失或损坏：${error.message}`); }
 }
 function number(value, min, max) {
@@ -84,6 +78,11 @@ class Session {
     catch (error) {
       if (this.mode !== 'shared-texture') throw error;
       this.mode = 'software'; this.player = new core.MpvPlayer({ mode: this.mode });
+    }
+    const version = this.player.getInfo()['mpv-version'];
+    if (!/^mpv (?:v)?0\.41\.0(?:\s|$)/.test(version || '')) {
+      this.player.destroy();
+      throw new Error(`需要 mpv 0.41.0，实际为 ${version}`);
     }
     this.attach();
   }

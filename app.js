@@ -64,7 +64,7 @@
     annotationThumbnails: {},
     timelinePreviewVideo: null, timelinePreviewPending: null, timelinePreviewRaf: null, timelinePreviewGeneration: 0, timelinePreviewCache: new Map(), timelinePreviewActive: null, timelinePreviewWarmIndex: 0, timelinePreviewWarmTimer: null,
     initialMediaPresentationSent: false,
-    mediaLoadGeneration: 0, mediaAwaitingMetadata: false, mediaAwaitingFirstFrame: false, mediaReplacing: false, mediaTransitionTimer: null
+    mediaLoadGeneration: 0, mediaAwaitingMetadata: false, mediaAwaitingFirstFrame: false, mediaReplacing: false, mediaTransitionTimer: null, mediaPresentationTimer: null
     ,colorPreset: 'original', colorRenderer: null, colorLuts: new Map(), colorRenderPending: false,
     guidesMaster: true, guideThirds: false, guideGolden: false, guideSpiral: false, guideSpiralRotation: 0, guideCenter: false, guideDiagonal: false, guideTriangle: false, guideSymmetry: false, guideActionSafe: false, guideTitleSafe: false, guideAspect: 'off', guideOpacity: .55, guideMaskStrength: .55,
     contactCandidates: [], contactSheetCancel: false, contactSheetBusy: false
@@ -81,13 +81,6 @@
   missingFrameNotice.className = 'missing-frame-notice'; missingFrameNotice.hidden = true; els.mediaSurface.appendChild(missingFrameNotice);
   const mediaTransitionCanvas = document.createElement('canvas');
   mediaTransitionCanvas.className = 'media-transition-canvas'; mediaTransitionCanvas.setAttribute('aria-hidden', 'true'); els.mediaSurface.appendChild(mediaTransitionCanvas);
-  const mediaLoadingOverlay = document.createElement('div');
-  mediaLoadingOverlay.className = 'media-loading-overlay'; mediaLoadingOverlay.setAttribute('role', 'status'); mediaLoadingOverlay.setAttribute('aria-live', 'polite'); mediaLoadingOverlay.setAttribute('aria-hidden', 'true');
-  const mediaLoadingSpinner = document.createElement('i'); mediaLoadingSpinner.className = 'media-loading-spinner'; mediaLoadingSpinner.setAttribute('aria-hidden', 'true');
-  const mediaLoadingCopy = document.createElement('span'); mediaLoadingCopy.className = 'media-loading-copy';
-  const mediaLoadingTitle = document.createElement('b'); mediaLoadingTitle.textContent = '正在载入画面';
-  const mediaLoadingName = document.createElement('small');
-  mediaLoadingCopy.append(mediaLoadingTitle, mediaLoadingName); mediaLoadingOverlay.append(mediaLoadingSpinner, mediaLoadingCopy); els.viewerStage.appendChild(mediaLoadingOverlay);
   const selectedBookmark = () => state.bookmarks.find(b => state.selectedBookmarkIds.includes(b.id));
 
   function formatTimecode(seconds) {
@@ -410,12 +403,12 @@
       bottomInset: state.cleanMode ? 0 : 44, sideInset, resizeWindow }).catch(() => {});
   }
 
-  function setCleanMode(enabled) {
+  function setCleanMode(enabled, resizeWindow = true) {
     hideTimelinePreview();
     if (enabled && !playback.duration) { toast('请先打开视频'); return; }
     if (state.cleanMode === enabled) return;
     state.cleanMode = enabled;
-    fitVideoWindowToMedia();
+    if (resizeWindow) fitVideoWindowToMedia();
     clearTimeout(classicTopbarTimer); classicTopbarTimer = null;
     classicPointerInside = false;
     if (enabled) closeClassicTopbarMenus();
@@ -986,6 +979,12 @@
     context.clearRect(0, 0, mediaTransitionCanvas.width, mediaTransitionCanvas.height);
   }
 
+  function clearMediaPresentationAnimation() {
+    clearTimeout(state.mediaPresentationTimer);
+    state.mediaPresentationTimer = null;
+    document.body.classList.remove('media-presenting', 'media-first-presenting');
+  }
+
   function captureMediaTransitionFrame() {
     if (playback.readyState < 2 || !playback.videoWidth || !playback.currentFrameCanvas) return false;
     clearMediaTransitionFrame();
@@ -1008,7 +1007,18 @@
     mediaTransitionCanvas.classList.add('releasing');
     state.mediaTransitionTimer = setTimeout(() => {
       if (generation === state.mediaLoadGeneration) clearMediaTransitionFrame();
-    }, 220);
+    }, 340);
+  }
+
+  function syncLoadedMediaMetadataUI() {
+    els.fpsInput.value = Number(state.fps.toFixed(3));
+    $('#hudFps').textContent = `${Number(state.fps.toFixed(3))} FPS`;
+    $('#propFps').textContent = `${Number(state.fps.toFixed(3))} fps`;
+    $('#hudResolution').textContent = `${playback.videoWidth} × ${playback.videoHeight}`;
+    $('#propFilename').textContent = state.fileName;
+    $('#propResolution').textContent = `${playback.videoWidth} × ${playback.videoHeight}`;
+    $('#propDuration').textContent = formatClock(playback.duration);
+    $('#propFrames').textContent = totalFrames().toLocaleString();
   }
 
   function presentLoadedMediaFrame() {
@@ -1019,12 +1029,32 @@
     state.mediaReplacing = false;
     els.viewerStage.classList.add('has-video');
     setMediaReady(true);
+    els.projectName.textContent = state.fileName;
+    els.projectName.title = state.fileName;
+    document.title = `${state.fileName} — Astria`;
+    desktopAPI?.setWindowTitle(`${state.fileName} — Astria`);
+    syncLoadedMediaMetadataUI();
+    if (!state.startupModeApplied) {
+      state.startupModeApplied = true;
+      if (state.startupMode === 'clean') setCleanMode(true, false);
+    }
+    document.body.classList.add('media-presenting');
+    document.body.classList.toggle('media-first-presenting', !hadTransitionFrame);
+    state.mediaPresentationTimer = setTimeout(() => {
+      if (generation === state.mediaLoadGeneration) clearMediaPresentationAnimation();
+    }, 340);
+    resetViewerView(false);
+    renderTimeline();
+    startFrameCacheLoop();
+    renderCompositionGuides();
+    if (state.colorPreset !== 'original') scheduleColorRender();
+    fitVideoWindowToMedia();
     updateUI(true);
     captureFrame();
+    saveWorkspace();
+    if (state.autoplayOnOpen && !playback.reconfiguring) play();
     requestAnimationFrame(() => {
       if (generation !== state.mediaLoadGeneration) return;
-      document.body.classList.remove('media-loading', 'media-replacing');
-      mediaLoadingOverlay.setAttribute('aria-hidden', 'true');
       setStatus(playback.paused ? '视频已就绪' : '播放中');
       if (hadTransitionFrame) requestAnimationFrame(() => releaseMediaTransitionFrame(generation));
     });
@@ -1034,8 +1064,7 @@
     state.mediaAwaitingMetadata = false;
     state.mediaAwaitingFirstFrame = false;
     state.mediaReplacing = false;
-    document.body.classList.remove('media-loading', 'media-replacing');
-    mediaLoadingOverlay.setAttribute('aria-hidden', 'true');
+    clearMediaPresentationAnimation();
     clearMediaTransitionFrame();
     els.viewerStage.classList.remove('has-video');
     setMediaReady(false);
@@ -1054,6 +1083,7 @@
     disposeTimelinePreview();
     state.annotationUndo = []; state.quickGesture = null;
     state.viewerZoomMode = 'fit'; state.viewerZoom = 1; state.viewerPan = { x: 0, y: 0 };
+    clearMediaPresentationAnimation();
     state.mediaLoadGeneration += 1;
     state.mediaAwaitingMetadata = true;
     state.mediaAwaitingFirstFrame = true;
@@ -1063,10 +1093,6 @@
       setMediaReady(false);
       els.viewerStage.classList.remove('has-video');
     }
-    document.body.classList.add('media-loading');
-    document.body.classList.toggle('media-replacing', replacingMedia);
-    mediaLoadingOverlay.setAttribute('aria-hidden', 'false');
-    mediaLoadingName.textContent = media.name;
     els.ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
     if (state.currentObjectUrl) URL.revokeObjectURL(state.currentObjectUrl);
     state.currentObjectUrl = ownedObjectUrl;
@@ -1076,11 +1102,6 @@
     activateMediaWorkspace(state.fileMeta);
     playback.setProjectFps(state.fps);
     playback.open(media);
-    els.projectName.textContent = media.name;
-    els.projectName.title = media.name;
-    document.title = `${media.name} — Astria`;
-    desktopAPI?.setWindowTitle(`${media.name} — Astria`);
-    setStatus(`正在载入 ${media.name}`);
 
   }
 
@@ -1108,27 +1129,12 @@
     if (state.fileMeta.mediaKind === 'video' && state.fpsMode === 'source' && state.fileMeta.sourceFps) {
       state.fps = state.fileMeta.sourceFps;
       playback.setProjectFps(state.fps);
-      els.fpsInput.value = Number(state.fps.toFixed(3));
-      $('#hudFps').textContent = `${Number(state.fps.toFixed(3))} FPS`;
-      $('#propFps').textContent = `${Number(state.fps.toFixed(3))} fps`;
     }
     playback.playbackRate = state.playbackSpeed;
-    $('#hudResolution').textContent = `${playback.videoWidth} × ${playback.videoHeight}`;
-    $('#propFilename').textContent = state.fileName;
-    $('#propResolution').textContent = `${playback.videoWidth} × ${playback.videoHeight}`;
-    $('#propDuration').textContent = formatClock(playback.duration);
-    $('#propFrames').textContent = totalFrames().toLocaleString();
-    setStatus(state.mediaAwaitingFirstFrame ? '正在准备首帧' : (playback.paused ? '视频已就绪' : '播放中'));
-    resetViewerView(false); renderTimeline(); updateUI(); startFrameCacheLoop(); captureFrame(); renderCompositionGuides();
-    if (state.colorPreset !== 'original') scheduleColorRender();
-    if (state.timelineHoverPreview) ensureTimelinePreviewVideo();
-    saveWorkspace();
-    if (!state.startupModeApplied) {
-      state.startupModeApplied = true;
-      if (state.startupMode === 'clean') setCleanMode(true);
+    if (!state.mediaAwaitingFirstFrame) {
+      syncLoadedMediaMetadataUI();
+      scheduleLayoutRefresh();
     }
-    fitVideoWindowToMedia();
-    if (state.autoplayOnOpen && !playback.reconfiguring) play();
   }
 
   function viewerFitScale(stage = els.viewerStage.getBoundingClientRect()) {
@@ -1892,24 +1898,43 @@
 
   async function loadWorkspace() {
     try {
-      const legacy = JSON.parse(localStorage.getItem(STORAGE_KEY));
-      if (legacy?.fileMeta) {
-        const legacyKey = mediaKey(legacy.fileMeta);
-        const library = readWorkspaceLibrary();
-        if (!library[legacyKey]) {
-          library[legacyKey] = { version:'0.2', fileMeta:legacy.fileMeta, fps:legacy.fps || 24, bookmarks:legacy.bookmarks || [], annotations:legacy.annotations || [], timelineZoom:legacy.timelineZoom || 1, updatedAt:legacy.updatedAt || new Date().toISOString() };
-          localStorage.setItem(WORKSPACES_KEY, JSON.stringify(library));
-        }
-        localStorage.removeItem(STORAGE_KEY);
-      }
-      const browserPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY)) || legacy || {};
-      const browserWorkspaces = JSON.parse(localStorage.getItem(WORKSPACES_KEY)) || {};
+      let legacy = null;
+      let browserPreferences = {};
+      let browserWorkspaces = {};
       if (desktopAPI) {
         const saved = await desktopAPI.loadAppData();
-        const savedPreferences = saved?.preferences && Object.keys(saved.preferences).length ? saved.preferences : browserPreferences;
-        const savedWorkspaces = saved?.workspaces && Object.keys(saved.workspaces).length ? saved.workspaces : browserWorkspaces;
+        const hasDesktopPreferences = saved?.preferences && Object.keys(saved.preferences).length > 0;
+        const hasDesktopWorkspaces = saved?.workspaces && Object.keys(saved.workspaces).length > 0;
+        // localStorage is only a migration fallback in the desktop build. Avoid
+        // parsing its potentially large thumbnail library on every launch.
+        if (!hasDesktopPreferences || !hasDesktopWorkspaces) {
+          legacy = JSON.parse(localStorage.getItem(STORAGE_KEY));
+          if (!hasDesktopPreferences) browserPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY)) || legacy || {};
+          if (!hasDesktopWorkspaces) browserWorkspaces = JSON.parse(localStorage.getItem(WORKSPACES_KEY)) || {};
+          if (!hasDesktopWorkspaces && legacy?.fileMeta) {
+            const legacyKey = mediaKey(legacy.fileMeta);
+            if (!browserWorkspaces[legacyKey]) {
+              browserWorkspaces[legacyKey] = { version:'0.2', fileMeta:legacy.fileMeta, fps:legacy.fps || 24, bookmarks:legacy.bookmarks || [], annotations:legacy.annotations || [], timelineZoom:legacy.timelineZoom || 1, updatedAt:legacy.updatedAt || new Date().toISOString() };
+            }
+          }
+        }
+        const savedPreferences = hasDesktopPreferences ? saved.preferences : browserPreferences;
+        const savedWorkspaces = hasDesktopWorkspaces ? saved.workspaces : browserWorkspaces;
         desktopData = { ...(saved || {}), preferences: savedPreferences, workspaces: savedWorkspaces };
-        syncDesktopAppData(savedWorkspaces, savedPreferences);
+        if (!hasDesktopPreferences || !hasDesktopWorkspaces) syncDesktopAppData(savedWorkspaces, savedPreferences);
+        if (legacy?.fileMeta) localStorage.removeItem(STORAGE_KEY);
+      } else {
+        legacy = JSON.parse(localStorage.getItem(STORAGE_KEY));
+        browserPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY)) || legacy || {};
+        browserWorkspaces = JSON.parse(localStorage.getItem(WORKSPACES_KEY)) || {};
+        if (legacy?.fileMeta) {
+          const legacyKey = mediaKey(legacy.fileMeta);
+          if (!browserWorkspaces[legacyKey]) {
+            browserWorkspaces[legacyKey] = { version:'0.2', fileMeta:legacy.fileMeta, fps:legacy.fps || 24, bookmarks:legacy.bookmarks || [], annotations:legacy.annotations || [], timelineZoom:legacy.timelineZoom || 1, updatedAt:legacy.updatedAt || new Date().toISOString() };
+            localStorage.setItem(WORKSPACES_KEY, JSON.stringify(browserWorkspaces));
+          }
+          localStorage.removeItem(STORAGE_KEY);
+        }
       }
       const preferences = desktopData?.preferences || browserPreferences;
       setAmbientEnabled(preferences.ambientEnabled !== false, false);
@@ -2051,7 +2076,20 @@
     scheduleColorRender();
   }
 
-  async function initializeDesktopRuntime() {
+  function beginDesktopBootstrap() {
+    if (!desktopAPI) return null;
+    const versionPromise = desktopAPI.getVersion().catch(() => '0.8.7');
+    const windowStatePromise = desktopAPI.getWindowState().catch(() => null);
+    const launchMediaPromise = desktopAPI.consumeLaunchMedia().catch(() => null);
+    // Only pay native player startup cost when this launch actually has media.
+    void launchMediaPromise.then(media => {
+      if (media && typeof playback.ensureSession === 'function') return playback.ensureSession().catch(() => {});
+      return null;
+    });
+    return { versionPromise, windowStatePromise, launchMediaPromise };
+  }
+
+  async function initializeDesktopRuntime(bootstrap = beginDesktopBootstrap()) {
     if (!desktopAPI) return;
     document.body.classList.add('desktop-runtime');
     desktopAPI.onOpenVideo(openDesktopVideo);
@@ -2059,9 +2097,7 @@
     desktopAPI.onWindowState(applyDesktopWindowState);
     desktopAPI.onWindowInteraction(setWindowInteraction);
     $('#clearRecentBtn').addEventListener('click', async () => { await desktopAPI.clearRecentVideos(); refreshRecentVideos(); });
-    const versionPromise = desktopAPI.getVersion().catch(() => '0.8.7');
-    const windowStatePromise = desktopAPI.getWindowState().catch(() => null);
-    const launchMediaPromise = desktopAPI.consumeLaunchMedia().catch(() => null);
+    const { versionPromise, windowStatePromise, launchMediaPromise } = bootstrap;
     void versionPromise.then(version => {
       $('#runtimeLabel').textContent = `V${version}`;
       $('#runtimeLabel').title = `DESKTOP · V${version}`;
@@ -2084,11 +2120,6 @@
     const preload = () => deferNonCriticalWork(() => { void preloadBuiltInColorLuts(); });
     if (state.mediaAwaitingFirstFrame) playback.addEventListener('frame', preload, { once: true });
     else preload();
-  }
-
-  function schedulePlaybackWarmup() {
-    if (!desktopAPI || state.mediaAwaitingFirstFrame || typeof playback.ensureSession !== 'function') return;
-    deferNonCriticalWork(() => { void playback.ensureSession().catch(() => {}); });
   }
 
   async function copyFrame(withAnnotations) {
@@ -2523,6 +2554,31 @@
   }
 
   function bindEvents() {
+    if (desktopAPI?.platform === 'win32' && desktopAPI.beginWindowResize) {
+      for (const edge of ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw']) {
+        const handle = document.createElement('div');
+        handle.className = `window-resize-handle window-resize-${edge}`;
+        handle.setAttribute('aria-hidden', 'true');
+        handle.addEventListener('pointerdown', event => {
+          if (event.button !== 0) return;
+          event.preventDefault(); event.stopPropagation();
+          handle.setPointerCapture(event.pointerId);
+          desktopAPI.beginWindowResize(edge, { x: event.screenX, y: event.screenY });
+        });
+        handle.addEventListener('pointermove', event => {
+          if (!handle.hasPointerCapture(event.pointerId)) return;
+          desktopAPI.updateWindowResize({ x: event.screenX, y: event.screenY });
+        });
+        const finishResize = event => {
+          if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+          desktopAPI.endWindowResize();
+        };
+        handle.addEventListener('pointerup', finishResize);
+        handle.addEventListener('pointercancel', finishResize);
+        handle.addEventListener('lostpointercapture', () => desktopAPI.endWindowResize());
+        document.body.append(handle);
+      }
+    }
     $('#cleanMuteBtn').addEventListener('click',()=>els.muteBtn.click());
     $('#cleanVolumeSlider').addEventListener('input',event=>{els.volumeSlider.value=event.target.value;els.volumeSlider.dispatchEvent(new Event('input'));});
     $('#cleanVolumeSlider').addEventListener('change',()=>persistPreferences());
@@ -2876,9 +2932,9 @@
     else if(e.key==='Delete')deleteSelection(); else if(e.key==='Escape'){els.helpModal.classList.remove('open');}
   }
 
+  const desktopBootstrap = beginDesktopBootstrap();
   await loadWorkspace(); bindEvents(); setMediaReady(false); renderBookmarks(); renderAnnotationList(); syncNotes(); updateUI();
-  await initializeDesktopRuntime();
-  schedulePlaybackWarmup();
+  await initializeDesktopRuntime(desktopBootstrap);
   scheduleBuiltInColorLutPreload();
   if (window.__astriaPlayback) {
     window.__astriaResponsiveSeekTest = {
