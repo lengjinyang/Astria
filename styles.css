@@ -2095,9 +2095,6 @@ body.desktop-runtime.media-ready:not(.clean-mode) .topbar :is(.brand,.top-center
 body.desktop-runtime .topbar :is(button,input,select,label,summary,.review-tool-cluster,.top-actions,.top-tool-panel,.export-menu,.top-more-menu) { -webkit-app-region: no-drag; }
 body.desktop-runtime:has(.modal-backdrop.open,.annotation-radial-menu.open) .topbar,
 body.desktop-runtime:has(.modal-backdrop.open,.annotation-radial-menu.open) .topbar * { -webkit-app-region: no-drag; }
-body.window-interacting #ambientCanvas,
-body.window-interacting #topbarAmbientCanvas { opacity: 0 !important; visibility: hidden; }
-
 /* Preserve the original control sizes; emphasize the timeline only while seeking. */
 body.media-ready:is(.clean-mode, :not(.clean-mode)) .bottom-dock .timeline-track {
   transition: height .13s ease, transform .13s ease;
