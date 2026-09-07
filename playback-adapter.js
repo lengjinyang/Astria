@@ -122,7 +122,7 @@
       if (!this.acceptFrame(metadata)) return;
       if (this.finishSourceFrame(metadata, frame)) return;
       this.resize(frame.displayWidth, frame.displayHeight);
-      this.presenter.draw(frame, true);
+      this.presenter.draw(frame);
     }
     drawSoftware(frame) {
       if (!this.acceptFrame(frame)) return;
@@ -213,7 +213,7 @@
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     }
-    draw(source, finish = false) {
+    draw(source) {
       if (!this.gl) {
         this.context.drawImage(source, 0, 0, this.canvas.width, this.canvas.height);
         return;
@@ -223,7 +223,7 @@
       gl.useProgram(this.program); gl.bindTexture(gl.TEXTURE_2D, this.texture);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
-      if (finish) gl.finish(); else gl.flush();
+      gl.flush();
     }
     destroy() {
       if (!this.gl) return;
