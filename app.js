@@ -48,7 +48,7 @@
     selectedAnnotationId: null, selectedAnnotationFrame: null, activeTool: 'select', annotationColor: '#8b5cf6', annotationVisible: true,
     timelineZoom: 1, reverseTimer: null, reverseSeekInFlight: false, reverseAnchorFrame: 0, reverseAnchorTime: 0, reverseFrame: 0, playbackUiRaf: null, isReverse: false, scrub: null, draw: null, favoriteOnly: false,
     view: 'list', autosave: true, currentObjectUrl: null, saveTimer: null, contextBookmarkId: null,
-    timelineScrub: null, timelineSeek: { pendingFrame: null, inFlight: false }, annotationScope: 'all',
+    timelineScrub: null, timelineSeek: { targetFrame: null, inFlightFrame: null, inFlight: false }, annotationScope: 'all',
     lumaMode: false, lumaContrast: 1, viewerScrubSensitivity: 0.3, lastFrameContent: null,
     volume: 1, muted: false, previousVolume: 1, loopInFrame: null, loopOutFrame: null,
     frameCache: new Map(), frameCacheCapture: null, frameCachePending: false, frameCacheHandle: null,
@@ -508,7 +508,8 @@
     const startFrame = Math.round(playback.currentTime * state.fps);
     playback.pause();
     stopReverse();
-    state.timelineSeek.pendingFrame = null;
+    state.timelineSeek.targetFrame = null;
+    state.timelineSeek.inFlightFrame = null;
     state.timelineSeek.inFlight = false;
     state.isReverse = true;
     revealCleanControls();
@@ -2042,25 +2043,32 @@
 
   function queueResponsiveSeek(frame) {
     const targetFrame = clamp(Math.round(frame), 0, totalFrames());
-    state.timelineSeek.pendingFrame = targetFrame;
-    showCachedFrame(targetFrame);
+    state.timelineSeek.targetFrame = targetFrame;
+    showCachedFrame(targetFrame, true);
     updatePlaybackUI(targetFrame / state.fps, targetFrame);
     pumpResponsiveSeek();
   }
 
   function pumpResponsiveSeek() {
     const controller = state.timelineSeek;
-    if (controller.inFlight || controller.pendingFrame === null || !playback.duration) return;
-    const frame = controller.pendingFrame;
-    controller.pendingFrame = null;
+    if (controller.inFlight || controller.targetFrame === null || !playback.duration) return;
+    const current = clamp(Math.round(playback.currentTime * state.fps), 0, totalFrames());
+    const target = controller.targetFrame;
+    if (current === target) { controller.targetFrame = null; updateUI(true); return; }
+    const distance = target - current;
+    const frame = Math.abs(distance) <= 6 ? current + Math.sign(distance) : target;
     const targetTime = frame / state.fps;
     if (Math.abs(playback.currentTime - targetTime) < frameDuration() * .2) {
-      if (controller.pendingFrame !== null) pumpResponsiveSeek();
+      if (frame === target) controller.targetFrame = null;
+      if (controller.targetFrame !== null) pumpResponsiveSeek();
       else if (!state.timelineScrub && !state.scrub) updateUI(true);
       return;
     }
-    controller.inFlight = true;
-    playback.currentTime = targetTime;
+    controller.inFlight = true; controller.inFlightFrame = frame;
+    const sourceFps = Number(playback.media?.sourceFps || playback.media?.fps);
+    if (Math.abs(distance) <= 6 && Math.abs(frame - current) === 1 &&
+        (playback.media?.mediaKind === 'sequence' || !sourceFps || Math.abs(sourceFps - state.fps) < .001)) playback.step(Math.sign(distance));
+    else playback.currentTime = targetTime;
   }
 
   function onResponsiveSeeked() {
@@ -2079,8 +2087,10 @@
       return;
     }
     if (!controller.inFlight) { updateUI(true); return; }
-    controller.inFlight = false;
-    if (controller.pendingFrame !== null) {
+    controller.inFlight = false; controller.inFlightFrame = null;
+    const actualFrame = clamp(Math.round(playback.currentTime * state.fps), 0, totalFrames());
+    if (controller.targetFrame === actualFrame) controller.targetFrame = null;
+    if (controller.targetFrame !== null) {
       state.lastFrameContent = currentFrame();
       drawAnnotations();
       pumpResponsiveSeek();
@@ -2686,5 +2696,11 @@
 
   await loadWorkspace(); void preloadBuiltInColorLuts(); bindEvents(); setMediaReady(false); renderBookmarks(); renderAnnotationList(); syncNotes(); updateUI();
   await initializeDesktopRuntime();
-  if (window.__astriaPlayback) window.__astriaReady = true;
+  if (window.__astriaPlayback) {
+    window.__astriaResponsiveSeekTest = {
+      seek: queueResponsiveSeek,
+      snapshot: () => ({ ...state.timelineSeek, frame: currentFrame(), fps: state.fps })
+    };
+    window.__astriaReady = true;
+  }
 })();

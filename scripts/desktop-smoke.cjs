@@ -20,6 +20,11 @@ module.exports = async function smoke(window, catalog, app) {
     });
     await wait(()=>p.readyState >= 2); p.pause(); await wait(()=>p.paused);
     p.seek(0.5); await wait(()=>!p.seeking && Math.abs(p.currentTime-.5)<.06);
+    const scrub=window.__astriaResponsiveSeekTest,startFrame=Math.round(p.currentTime*scrub.snapshot().fps),scrubTrace=[];
+    const traceFrame=()=>{const frame=Math.round(p.currentTime*scrub.snapshot().fps);if(scrubTrace.at(-1)!==frame)scrubTrace.push(frame);};
+    p.addEventListener('frame',traceFrame);scrub.seek(startFrame+4);
+    await wait(()=>scrub.snapshot().targetFrame===null&&!scrub.snapshot().inFlight);p.removeEventListener('frame',traceFrame);
+    if(scrubTrace.length<4||scrubTrace.some((frame,index)=>index&&frame-scrubTrace[index-1]!==1))throw new Error('Responsive scrub skipped nearby frames '+JSON.stringify(scrubTrace));
     const before=p.currentTime; p.step(1); await wait(()=>!p.seeking && p.currentTime>before);
     p.step(-1); await wait(()=>!p.seeking && Math.abs(p.currentTime-before)<.01);
     p.playbackRate=1.5; p.volume=.4; p.muted=true;
