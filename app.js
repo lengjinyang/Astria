@@ -48,7 +48,7 @@
     selectedAnnotationId: null, selectedAnnotationFrame: null, activeTool: 'select', annotationColor: '#8b5cf6', annotationVisible: true,
     timelineZoom: 1, reverseTimer: null, reverseSeekInFlight: false, reverseAnchorFrame: 0, reverseAnchorTime: 0, reverseFrame: 0, playbackUiRaf: null, isReverse: false, scrub: null, draw: null, favoriteOnly: false,
     view: 'list', autosave: true, currentObjectUrl: null, saveTimer: null, contextBookmarkId: null,
-    timelineScrub: null, timelineSeek: { pendingFrame: null, inFlight: false, displayGate: false }, annotationScope: 'all',
+    timelineScrub: null, timelineSeek: { pendingFrame: null, inFlight: false, displayGate: false, displayFrame: null }, annotationScope: 'all',
     lumaMode: false, lumaContrast: 1, viewerScrubSensitivity: 0.3, lastFrameContent: null,
     volume: 1, muted: false, previousVolume: 1, loopInFrame: null, loopOutFrame: null,
     frameCache: new Map(), frameCacheCapture: null, frameCachePending: false, frameCacheHandle: null,
@@ -464,7 +464,7 @@
     state.reverseTimer = null;
     if (!state.isReverse || state.reverseSeekInFlight || !playback.duration) return;
     const loopStartFrame = hasLoopRange() ? state.loopInFrame : 0;
-    const loopEndFrame = hasLoopRange() ? state.loopOutFrame : totalFrames();
+    const loopEndFrame = hasLoopRange() ? state.loopOutFrame : lastFrame();
     const elapsedSeconds = Math.max(0, now - state.reverseAnchorTime) / 1000;
     let targetFrame = state.reverseAnchorFrame - Math.floor(elapsedSeconds * state.fps * state.playbackSpeed);
 
@@ -524,7 +524,7 @@
   function seekFrame(frame, shouldPause = true, renderFrameContent = true) {
     if (!playback.duration) return;
     if (shouldPause) pause();
-    const targetFrame = clamp(frame, 0, totalFrames());
+    const targetFrame = clamp(frame, 0, lastFrame());
     const selectedAnnotation = state.annotations.find(a => a.id === state.selectedAnnotationId);
     if (selectedAnnotation && selectedAnnotation.frame !== Math.round(targetFrame)) { state.selectedAnnotationId = null; state.selectedAnnotationFrame = null; }
     showCachedFrame(targetFrame);
@@ -640,7 +640,7 @@
 
   function clearFrameCache() {
     state.frameCacheGeneration += 1;
-    state.timelineSeek.displayGate = false;
+    state.timelineSeek.displayGate = false; state.timelineSeek.displayFrame = null;
     if (state.frameCacheHandle !== null && playback.cancelVideoFrameCallback) playback.cancelVideoFrameCallback(state.frameCacheHandle);
     state.frameCacheHandle = null;
     state.frameCachePending = false;
@@ -726,7 +726,7 @@
     updateCacheStatus();
   }
 
-  function showPlaybackFrameOverlay() {
+  function showPlaybackFrameOverlay(frame = currentFrame()) {
     if (playback.readyState < 2 || !playback.videoWidth || !playback.currentFrameCanvas) return false;
     const source = playback.currentFrameCanvas;
     const sourceWidth = source.width || playback.videoWidth, sourceHeight = source.height || playback.videoHeight;
@@ -735,14 +735,15 @@
     if (els.cacheCanvas.width !== width || els.cacheCanvas.height !== height) { els.cacheCanvas.width = width; els.cacheCanvas.height = height; }
     els.cacheCtx.drawImage(source, 0, 0, width, height);
     els.cacheCanvas.classList.add('visible');
-    state.timelineSeek.displayGate = true;
+    state.timelineSeek.displayGate = true; state.timelineSeek.displayFrame = frame;
+    window.__astriaResponsiveSeekTest?.trace.push(frame);
     scheduleColorRender();
     return true;
   }
 
   function releaseResponsiveSeekDisplay() {
     if (state.timelineSeek.inFlight || state.timelineSeek.pendingFrame !== null || state.timelineScrub || state.scrub || state.quickGesture?.tool === 'select') return;
-    state.timelineSeek.displayGate = false;
+    state.timelineSeek.displayGate = false; state.timelineSeek.displayFrame = null;
     hideCachedFrame();
   }
 
@@ -945,7 +946,7 @@
   }
 
   function renderLoopRange() {
-    const total = Math.max(1, totalFrames());
+    const total = Math.max(1, lastFrame());
     const inSet = Number.isFinite(state.loopInFrame);
     const outSet = Number.isFinite(state.loopOutFrame);
     els.loopInMarker.classList.toggle('show', inSet);
@@ -1241,11 +1242,11 @@
     els.ruler.style.width = `${width}%`;
     els.markerLayer.innerHTML = '';
     els.annotationMarkerLayer.innerHTML = '';
-    const duration = playback.duration || 1;
+    const timelineLastFrame = Math.max(1, lastFrame());
     state.bookmarks.forEach(b => {
       const marker = document.createElement('div');
       marker.className = `timeline-marker${state.selectedBookmarkIds.includes(b.id) ? ' active' : ''}`;
-      marker.dataset.id = b.id; marker.style.left = `${clamp(b.timestamp / duration * 100, 0, 100)}%`;
+      marker.dataset.id = b.id; marker.style.left = `${clamp(b.frame / timelineLastFrame * 100, 0, 100)}%`;
       marker.style.setProperty('--marker-color', b.color); marker.title = `${b.title} · Frame ${sourceFrame(b.frame)}`;
       marker.addEventListener('click', e => { e.stopPropagation(); selectBookmark(b.id, e.ctrlKey || e.metaKey); });
       let moving = false;
@@ -1253,9 +1254,9 @@
       marker.addEventListener('pointermove', e => {
         if (!moving) return;
         const rect = els.timelineTrack.getBoundingClientRect();
-        b.timestamp = clamp((e.clientX - rect.left) / rect.width, 0, 1) * duration;
-        b.frame = Math.round(b.timestamp * state.fps); b.timestamp = b.frame / state.fps;
-        marker.style.left = `${b.timestamp / duration * 100}%`; seekFrame(b.frame); renderBookmarks();
+        b.frame = Math.round(clamp((e.clientX - rect.left) / rect.width, 0, 1) * lastFrame());
+        b.timestamp = b.frame / state.fps;
+        marker.style.left = `${b.frame / timelineLastFrame * 100}%`; seekFrame(b.frame); renderBookmarks();
       });
       marker.addEventListener('pointerup', () => { moving = false; saveWorkspace(); });
       els.markerLayer.appendChild(marker);
@@ -1269,7 +1270,7 @@
       const marker = document.createElement('div');
       marker.className = 'annotation-timeline-marker';
       marker.dataset.frame = frame;
-      marker.style.left = `${clamp((frame / state.fps) / duration * 100, 0, 100)}%`;
+      marker.style.left = `${clamp(frame / timelineLastFrame * 100, 0, 100)}%`;
       marker.style.setProperty('--annotation-marker-color', annotations[0].color || state.annotationColor);
       marker.title = `Frame ${sourceFrame(frame)} 有批注 · ${annotations.length} 个内容`;
       marker.addEventListener('pointerdown', e => e.stopPropagation());
@@ -2047,7 +2048,7 @@
     }
     const trackRect = els.timelineTrack.getBoundingClientRect();
     const ratio = clamp((e.clientX - trackRect.left) / trackRect.width, 0, 1);
-    const frame = clamp(Math.round(ratio * totalFrames()), 0, Math.max(0, Math.ceil(playback.duration * state.fps) - 1));
+    const frame = Math.round(ratio * lastFrame());
     // Seek inside the selected frame to avoid decoding the preceding boundary frame.
     const time = Math.min((frame + .25) / state.fps, Math.max(0, playback.duration - .001));
     els.timelineTooltip.dataset.frame = String(frame);
@@ -2089,7 +2090,13 @@
 
   function onResponsiveSeeked() {
     const controller = state.timelineSeek;
-    if (controller.inFlight && controller.pendingFrame === null) showPlaybackFrameOverlay();
+    if (controller.inFlight) {
+      const decodedFrame = currentFrame();
+      const latestTarget = controller.pendingFrame;
+      const displayedFrame = controller.displayFrame;
+      if (latestTarget === null || displayedFrame === null ||
+          Math.abs(decodedFrame - latestTarget) <= Math.abs(displayedFrame - latestTarget)) showPlaybackFrameOverlay(decodedFrame);
+    }
     captureFrame(); scheduleColorRender();
     if (state.annotations.some(annotation => annotation.frame === currentFrame()) && !state.annotationThumbnails[currentFrame()]) {
       updateAnnotationThumbnail(currentFrame()); renderAnnotationList(); saveWorkspace();
@@ -2319,7 +2326,7 @@
 
   function collectContactCandidates() {
     const candidates=new Map();
-    const add=(frame,kind,label)=>{frame=clamp(Math.round(frame),0,totalFrames());const current=candidates.get(frame);if(current){if(!current.kinds.includes(kind))current.kinds.push(kind);if(label&&!current.labels.includes(label))current.labels.push(label);}else candidates.set(frame,{frame,kinds:[kind],labels:label?[label]:[],selected:true});};
+    const add=(frame,kind,label)=>{frame=clamp(Math.round(frame),0,lastFrame());const current=candidates.get(frame);if(current){if(!current.kinds.includes(kind))current.kinds.push(kind);if(label&&!current.labels.includes(label))current.labels.push(label);}else candidates.set(frame,{frame,kinds:[kind],labels:label?[label]:[],selected:true});};
     if($('#contactBookmarks').checked)state.bookmarks.forEach(bookmark=>add(bookmark.frame,'书签',bookmark.title||'书签'));
     if($('#contactAnnotations').checked){const frames=[...new Set(state.annotations.map(annotation=>annotation.frame))];frames.forEach(frame=>{const types=[...new Set(state.annotations.filter(a=>a.frame===frame).map(a=>annotationName(a.type)))];add(frame,'批注',types.slice(0,3).join('、')||'批注');});}
     if($('#contactLoop').checked){if(hasLoopRange()){const count=clamp(Number($('#contactSampleCount').value)||12,4,24);for(let index=0;index<count;index++)add(state.loopInFrame+(state.loopOutFrame-state.loopInFrame)*(count===1?0:index/(count-1)),'I/O','均匀取样');}}
@@ -2385,7 +2392,7 @@
     playback.addEventListener('error',()=>{document.body.classList.remove('media-loading');announceInitialMediaPresented(true);setMediaReady(false);setStatus('视频载入失败');toast(playback.error?.message || '无法播放此视频，请检查编码格式');});
     playback.addEventListener('frame',()=>{if(!state.timelineScrub&&!state.scrub&&!state.timelineSeek.inFlight)updateUI();if(!playback.requestVideoFrameCallback){captureFrame();scheduleColorRender();}});
     playback.addEventListener('frame',event=>{if(event.detail?.seeked)onResponsiveSeeked();});
-    playback.addEventListener('playing',()=>{hideCachedFrame();els.playBtn.classList.add('playing');setStatus('播放中');startPlaybackUiLoop();revealCleanControls();});
+    playback.addEventListener('playing',()=>{state.timelineSeek.displayGate=false;state.timelineSeek.displayFrame=null;hideCachedFrame();els.playBtn.classList.add('playing');setStatus('播放中');startPlaybackUiLoop();revealCleanControls();});
     playback.addEventListener('paused',()=>{els.playBtn.classList.remove('playing');stopPlaybackUiLoop();if(!state.isReverse)setStatus('已暂停');revealCleanControls();});
     playback.addEventListener('ended',handlePlaybackEnded);
     els.playBtn.addEventListener('click',()=>playback.paused&&!state.isReverse?play():pause());
@@ -2714,5 +2721,12 @@
 
   await loadWorkspace(); void preloadBuiltInColorLuts(); bindEvents(); setMediaReady(false); renderBookmarks(); renderAnnotationList(); syncNotes(); updateUI();
   await initializeDesktopRuntime();
-  if (window.__astriaPlayback) window.__astriaReady = true;
+  if (window.__astriaPlayback) {
+    window.__astriaResponsiveSeekTest = {
+      trace: [],
+      seek: queueResponsiveSeek,
+      snapshot: () => ({ ...state.timelineSeek, frame: currentFrame(), fps: state.fps })
+    };
+    window.__astriaReady = true;
+  }
 })();

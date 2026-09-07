@@ -20,6 +20,10 @@ module.exports = async function smoke(window, catalog, app) {
     });
     await wait(()=>p.readyState >= 2); p.pause(); await wait(()=>p.paused);
     p.seek(0.5); await wait(()=>!p.seeking && Math.abs(p.currentTime-.5)<.06);
+    const scrub=window.__astriaResponsiveSeekTest,startFrame=Math.round(p.currentTime*scrub.snapshot().fps);
+    scrub.trace.length=0;scrub.seek(startFrame+2);scrub.seek(startFrame+6);
+    await wait(()=>!scrub.snapshot().inFlight&&scrub.snapshot().pendingFrame===null);
+    if(!scrub.trace.includes(startFrame+2)||scrub.trace.at(-1)!==startFrame+6)throw new Error('Scrub overlay did not update while dragging '+JSON.stringify(scrub.trace));
     const before=p.currentTime; p.step(1); await wait(()=>!p.seeking && p.currentTime>before);
     p.step(-1); await wait(()=>!p.seeking && Math.abs(p.currentTime-before)<.01);
     p.playbackRate=1.5; p.volume=.4; p.muted=true;
