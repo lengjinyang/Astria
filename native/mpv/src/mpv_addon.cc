@@ -21,6 +21,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -142,6 +143,7 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
       InstanceMethod("setEventCallback", &MpvPlayer::SetEventCallback),
       InstanceMethod("renderFrame", &MpvPlayer::RenderFrame),
       InstanceMethod("renderSharedTexture", &MpvPlayer::RenderSharedTexture),
+      InstanceMethod("releaseSharedTexture", &MpvPlayer::ReleaseSharedTexture),
       InstanceMethod("pollEvents", &MpvPlayer::PollEvents),
       InstanceMethod("destroy", &MpvPlayer::Destroy),
     });
@@ -158,6 +160,11 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
         mode_ = options.Get("mode").As<Napi::String>().Utf8Value();
       }
     }
+#ifdef _WIN32
+    if (const char* slots = std::getenv("ASTRIA_SHARED_TEXTURE_SLOTS")) {
+      if (std::strcmp(slots, "1") == 0) dx_slot_count_ = 1;
+    }
+#endif
 
     handle_ = mpv_create();
     if (!handle_) {
@@ -426,7 +433,7 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
       double value = 0;
       if (mpv_get_property(handle_, key, MPV_FORMAT_DOUBLE, &value) >= 0) result.Set(key, value);
     }
-    for (const char* key : {"mpv-version", "mpv-configuration", "ffmpeg-version", "video-codec", "file-format", "video-params/primaries", "video-params/gamma"}) {
+    for (const char* key : {"mpv-version", "mpv-configuration", "ffmpeg-version", "video-codec", "file-format", "hwdec-current", "video-params/primaries", "video-params/gamma"}) {
       char* value = mpv_get_property_string(handle_, key);
       if (value) { result.Set(key, value); mpv_free(value); }
     }
@@ -620,7 +627,15 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
     width = std::min(width, 16384);
     height = std::min(height, 16384);
 
-    if (!ensure_dx_shared_target(width, height)) {
+    int slot_id = acquire_dx_export_slot();
+    if (slot_id < 0) {
+      Napi::Object busy = Napi::Object::New(env);
+      busy.Set("busy", true);
+      return busy;
+    }
+
+    if (!ensure_dx_shared_target(width, height) ||
+        !ensure_dx_export_slot(slot_id, width, height)) {
       Napi::Error::New(env, dx_error_.empty() ? "Failed to create WGL/D3D11 shared texture target" : dx_error_).ThrowAsJavaScriptException();
       return env.Null();
     }
@@ -658,21 +673,24 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
       return env.Null();
     }
 
-    HRESULT copy_hr = dx_keyed_mutex_->AcquireSync(0, 1000);
+    DxExportSlot& slot = dx_export_slots_[slot_id];
+    HRESULT copy_hr = slot.keyed_mutex->AcquireSync(0, 1000);
     if (FAILED(copy_hr)) {
       Napi::Error::New(env, "IDXGIKeyedMutex::AcquireSync failed: " + hex_u32(static_cast<unsigned long>(copy_hr))).ThrowAsJavaScriptException();
       return env.Null();
     }
-    d3d_context_->CopyResource(d3d_export_texture_, d3d_interop_texture_);
+    d3d_context_->CopyResource(slot.texture, d3d_interop_texture_);
     d3d_context_->Flush();
-    copy_hr = dx_keyed_mutex_->ReleaseSync(0);
+    copy_hr = slot.keyed_mutex->ReleaseSync(0);
     if (FAILED(copy_hr)) {
       Napi::Error::New(env, "IDXGIKeyedMutex::ReleaseSync failed: " + hex_u32(static_cast<unsigned long>(copy_hr))).ThrowAsJavaScriptException();
       return env.Null();
     }
 
+    slot.in_flight = true;
+
     Napi::Object handle = Napi::Object::New(env);
-    uintptr_t nt_handle = reinterpret_cast<uintptr_t>(dx_shared_handle_);
+    uintptr_t nt_handle = reinterpret_cast<uintptr_t>(slot.shared_handle);
     handle.Set("ntHandle", Napi::Buffer<uint8_t>::Copy(
       env,
       reinterpret_cast<uint8_t*>(&nt_handle),
@@ -696,7 +714,9 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
     colorSpace.Set("range", "full");
 
     Napi::Object textureInfo = Napi::Object::New(env);
-    textureInfo.Set("id", std::to_string(reinterpret_cast<uintptr_t>(dx_shared_handle_)));
+    textureInfo.Set("id", std::to_string(reinterpret_cast<uintptr_t>(slot.shared_handle)));
+    textureInfo.Set("slotId", slot_id);
+    textureInfo.Set("busy", false);
     textureInfo.Set("pixelFormat", "bgra");
     textureInfo.Set("codedSize", size);
     textureInfo.Set("visibleRect", rect);
@@ -707,6 +727,16 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
 
     return textureInfo;
 #endif
+  }
+
+  Napi::Value ReleaseSharedTexture(const Napi::CallbackInfo& info) {
+#ifdef _WIN32
+    if (info.Length() >= 1 && info[0].IsNumber()) {
+      int slot_id = info[0].As<Napi::Number>().Int32Value();
+      if (slot_id >= 0 && slot_id < dx_slot_count_) dx_export_slots_[slot_id].in_flight = false;
+    }
+#endif
+    return info.Env().Undefined();
   }
 
   Napi::Value PollEvents(const Napi::CallbackInfo& info) {
@@ -965,6 +995,15 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
 #endif
 
 #ifdef _WIN32
+  struct DxExportSlot {
+    ID3D11Texture2D* texture = nullptr;
+    IDXGIKeyedMutex* keyed_mutex = nullptr;
+    HANDLE shared_handle = nullptr;
+    int width = 0;
+    int height = 0;
+    bool in_flight = false;
+  };
+
   static void* get_proc_address(void*, const char* name) {
     void* proc = reinterpret_cast<void*>(wglGetProcAddress(name));
     if (proc) return proc;
@@ -1077,7 +1116,7 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
     return dx_interop_device_ != nullptr;
   }
 
-  void destroy_dx_shared_target() {
+  void destroy_dx_interop_target() {
     if (win_gl_context_) {
       wglMakeCurrent(win_dc_, win_gl_context_);
       if (dx_interop_object_) {
@@ -1093,18 +1132,6 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
         win_gl_texture_ = 0;
       }
     }
-    if (dx_shared_handle_) {
-      CloseHandle(dx_shared_handle_);
-      dx_shared_handle_ = nullptr;
-    }
-    if (dx_keyed_mutex_) {
-      dx_keyed_mutex_->Release();
-      dx_keyed_mutex_ = nullptr;
-    }
-    if (d3d_export_texture_) {
-      d3d_export_texture_->Release();
-      d3d_export_texture_ = nullptr;
-    }
     if (d3d_interop_texture_) {
       d3d_interop_texture_->Release();
       d3d_interop_texture_ = nullptr;
@@ -1113,12 +1140,35 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
     dx_height_ = 0;
   }
 
+  void destroy_dx_export_slot(DxExportSlot& slot) {
+    if (slot.shared_handle) CloseHandle(slot.shared_handle);
+    if (slot.keyed_mutex) slot.keyed_mutex->Release();
+    if (slot.texture) slot.texture->Release();
+    slot = {};
+  }
+
+  void destroy_dx_shared_target() {
+    destroy_dx_interop_target();
+    for (auto& slot : dx_export_slots_) destroy_dx_export_slot(slot);
+  }
+
+  int acquire_dx_export_slot() {
+    for (int offset = 0; offset < dx_slot_count_; ++offset) {
+      int slot_id = (dx_next_slot_ + offset) % dx_slot_count_;
+      if (!dx_export_slots_[slot_id].in_flight) {
+        dx_next_slot_ = (slot_id + 1) % dx_slot_count_;
+        return slot_id;
+      }
+    }
+    return -1;
+  }
+
   bool ensure_dx_shared_target(int width, int height) {
-    if (d3d_export_texture_ && d3d_interop_texture_ && dx_width_ == width && dx_height_ == height) {
+    if (d3d_interop_texture_ && dx_width_ == width && dx_height_ == height) {
       return true;
     }
 
-    destroy_dx_shared_target();
+    destroy_dx_interop_target();
     dx_error_.clear();
     wglMakeCurrent(win_dc_, win_gl_context_);
 
@@ -1139,43 +1189,6 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
       return false;
     }
 
-    D3D11_TEXTURE2D_DESC export_desc = interop_desc;
-    export_desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
-    hr = d3d_device_->CreateTexture2D(&export_desc, nullptr, &d3d_export_texture_);
-    if (FAILED(hr)) {
-      dx_error_ = "CreateTexture2D(export) failed: " + hex_u32(static_cast<unsigned long>(hr));
-      destroy_dx_shared_target();
-      return false;
-    }
-
-    hr = d3d_export_texture_->QueryInterface(__uuidof(IDXGIKeyedMutex), reinterpret_cast<void**>(&dx_keyed_mutex_));
-    if (FAILED(hr) || !dx_keyed_mutex_) {
-      dx_error_ = "QueryInterface(IDXGIKeyedMutex) failed: " + hex_u32(static_cast<unsigned long>(hr));
-      destroy_dx_shared_target();
-      return false;
-    }
-
-    IDXGIResource1* dxgi_resource = nullptr;
-    hr = d3d_export_texture_->QueryInterface(__uuidof(IDXGIResource1), reinterpret_cast<void**>(&dxgi_resource));
-    if (FAILED(hr) || !dxgi_resource) {
-      dx_error_ = "QueryInterface(IDXGIResource1) failed: " + hex_u32(static_cast<unsigned long>(hr));
-      destroy_dx_shared_target();
-      return false;
-    }
-
-    hr = dxgi_resource->CreateSharedHandle(
-      nullptr,
-      DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
-      nullptr,
-      &dx_shared_handle_
-    );
-    dxgi_resource->Release();
-    if (FAILED(hr) || !dx_shared_handle_) {
-      dx_error_ = "CreateSharedHandle failed: " + hex_u32(static_cast<unsigned long>(hr));
-      destroy_dx_shared_target();
-      return false;
-    }
-
     glGenTextures(1, &win_gl_texture_);
     glBindTexture(GL_TEXTURE_2D, win_gl_texture_);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1192,13 +1205,13 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
     );
     if (!dx_interop_object_) {
       dx_error_ = "wglDXRegisterObjectNV failed: " + hex_u32(GetLastError());
-      destroy_dx_shared_target();
+      destroy_dx_interop_target();
       return false;
     }
 
     if (!wglDXLockObjectsNV_(dx_interop_device_, 1, &dx_interop_object_)) {
       dx_error_ = "wglDXLockObjectsNV(target setup) failed: " + hex_u32(GetLastError());
-      destroy_dx_shared_target();
+      destroy_dx_interop_target();
       return false;
     }
 
@@ -1209,12 +1222,68 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
     wglDXUnlockObjectsNV_(dx_interop_device_, 1, &dx_interop_object_);
     if (!complete) {
       dx_error_ = "OpenGL framebuffer for WGL/D3D11 interop texture is incomplete";
-      destroy_dx_shared_target();
+      destroy_dx_interop_target();
       return false;
     }
 
     dx_width_ = width;
     dx_height_ = height;
+    return true;
+  }
+
+  bool ensure_dx_export_slot(int slot_id, int width, int height) {
+    DxExportSlot& slot = dx_export_slots_[slot_id];
+    if (slot.texture && slot.width == width && slot.height == height) return true;
+    if (slot.in_flight) {
+      dx_error_ = "Attempted to resize an in-flight shared texture slot";
+      return false;
+    }
+    destroy_dx_export_slot(slot);
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = static_cast<UINT>(width);
+    desc.Height = static_cast<UINT>(height);
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+
+    HRESULT hr = d3d_device_->CreateTexture2D(&desc, nullptr, &slot.texture);
+    if (FAILED(hr)) {
+      dx_error_ = "CreateTexture2D(export slot) failed: " + hex_u32(static_cast<unsigned long>(hr));
+      destroy_dx_export_slot(slot);
+      return false;
+    }
+    hr = slot.texture->QueryInterface(__uuidof(IDXGIKeyedMutex), reinterpret_cast<void**>(&slot.keyed_mutex));
+    if (FAILED(hr) || !slot.keyed_mutex) {
+      dx_error_ = "QueryInterface(IDXGIKeyedMutex) failed: " + hex_u32(static_cast<unsigned long>(hr));
+      destroy_dx_export_slot(slot);
+      return false;
+    }
+    IDXGIResource1* resource = nullptr;
+    hr = slot.texture->QueryInterface(__uuidof(IDXGIResource1), reinterpret_cast<void**>(&resource));
+    if (FAILED(hr) || !resource) {
+      dx_error_ = "QueryInterface(IDXGIResource1) failed: " + hex_u32(static_cast<unsigned long>(hr));
+      destroy_dx_export_slot(slot);
+      return false;
+    }
+    hr = resource->CreateSharedHandle(
+      nullptr,
+      DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+      nullptr,
+      &slot.shared_handle
+    );
+    resource->Release();
+    if (FAILED(hr) || !slot.shared_handle) {
+      dx_error_ = "CreateSharedHandle(export slot) failed: " + hex_u32(static_cast<unsigned long>(hr));
+      destroy_dx_export_slot(slot);
+      return false;
+    }
+    slot.width = width;
+    slot.height = height;
     return true;
   }
 #endif
@@ -1244,9 +1313,9 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
   ID3D11Device* d3d_device_ = nullptr;
   ID3D11DeviceContext* d3d_context_ = nullptr;
   ID3D11Texture2D* d3d_interop_texture_ = nullptr;
-  ID3D11Texture2D* d3d_export_texture_ = nullptr;
-  IDXGIKeyedMutex* dx_keyed_mutex_ = nullptr;
-  HANDLE dx_shared_handle_ = nullptr;
+  std::array<DxExportSlot, 3> dx_export_slots_;
+  int dx_slot_count_ = 3;
+  int dx_next_slot_ = 0;
   HANDLE dx_interop_device_ = nullptr;
   HANDLE dx_interop_object_ = nullptr;
   GLuint win_gl_texture_ = 0;

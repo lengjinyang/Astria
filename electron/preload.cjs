@@ -1,9 +1,9 @@
 const { contextBridge, ipcRenderer, sharedTexture, webUtils } = require('electron');
 
 const textureCallbacks = new Map();
-if (sharedTexture) sharedTexture.setSharedTextureReceiver(async ({ importedSharedTexture }, id) => {
+if (sharedTexture) sharedTexture.setSharedTextureReceiver(async ({ importedSharedTexture }, id, metadata = {}) => {
   const frame = importedSharedTexture.getVideoFrame();
-  try { for (const callback of textureCallbacks.get(id) || []) await callback(frame); }
+  try { for (const callback of textureCallbacks.get(id) || []) await callback(frame, metadata); }
   finally { frame.close(); importedSharedTexture.release(); }
 });
 
@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
     setSpeed: (id, speed) => ipcRenderer.invoke('media:setSpeed', id, speed),
     setVolume: (id, volume) => ipcRenderer.invoke('media:setVolume', id, volume),
     setMuted: (id, muted) => ipcRenderer.invoke('media:setMuted', id, muted),
+    setOutputTarget: (id, target) => ipcRenderer.invoke('media:setOutputTarget', id, target),
+    requestSourceFrame: (id, request) => ipcRenderer.invoke('media:requestSourceFrame', id, request),
     captureFrame: id => ipcRenderer.invoke('media:captureFrame', id),
     destroy: id => ipcRenderer.invoke('media:destroy', id),
     onState: callback => on('media:state', callback),

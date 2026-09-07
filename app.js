@@ -437,7 +437,7 @@
     revealCleanControls();
     requestAnimationFrame(() => { resizeCanvas(); updatePlaybackUI(); });
   }
-  function pause() { playback.pause(); stopReverse(); }
+  function pause(outputMode = 'source') { playback.pause(); stopReverse(); updateMediaOutputTarget(outputMode); }
   function hasLoopRange() {
     return Number.isFinite(state.loopInFrame) && Number.isFinite(state.loopOutFrame) && state.loopOutFrame > state.loopInFrame;
   }
@@ -447,6 +447,7 @@
     if (hasLoopRange() && (currentFrame() < state.loopInFrame || currentFrame() >= state.loopOutFrame)) {
       playback.currentTime = state.loopInFrame / state.fps;
     }
+    updateMediaOutputTarget('viewport');
     playback.play().catch(() => {});
   }
 
@@ -518,6 +519,7 @@
     if (!hasLoopRange() && currentFrame() <= 0) { setStatus('已在第一帧'); return; }
     const startFrame = Math.round(playback.currentTime * state.fps);
     playback.pause();
+    updateMediaOutputTarget('viewport');
     stopReverse();
     state.timelineSeek.pendingFrame = null;
     state.timelineSeek.inFlight = false;
@@ -1182,6 +1184,20 @@
     els.ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
     scheduleColorRender();
     drawAnnotations();
+    updateMediaOutputTarget();
+  }
+
+  function updateMediaOutputTarget(mode = null) {
+    if (!playback.videoWidth || !playback.videoHeight || typeof playback.setOutputTarget !== 'function') return;
+    const sourceRequired = state.pixelInspector ||
+      (state.viewerZoomMode === 'custom' && Math.abs(state.viewerZoom - 1) < .001) ||
+      (playback.paused && !state.isReverse);
+    const activeMode = mode || ((state.timelineScrub || state.scrub?.dragging) ? 'scrub' : (sourceRequired ? 'source' : 'viewport'));
+    const picture = els.mediaSurface.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const width = activeMode === 'source' ? playback.videoWidth : Math.min(playback.videoWidth, Math.round(Math.max(2, picture.width) * dpr));
+    const height = activeMode === 'source' ? playback.videoHeight : Math.min(playback.videoHeight, Math.round(Math.max(2, picture.height) * dpr));
+    playback.setOutputTarget(width, height, activeMode);
   }
 
   function scheduleLayoutRefresh() {
@@ -2077,8 +2093,8 @@
 
   async function copyFrame(withAnnotations) {
     if (!playback.videoWidth) return;
-    const c = document.createElement('canvas'); c.width=playback.videoWidth; c.height=playback.videoHeight;
-    const ctx=c.getContext('2d'); ctx.drawImage(playback.currentFrameCanvas,0,0,c.width,c.height);
+    const c = await playback.captureFrame();
+    const ctx=c.getContext('2d');
     if (withAnnotations) {
       const list=state.annotations.filter(a=>a.frame===currentFrame()&&!a.hidden);
       list.forEach(a=>drawShape(ctx,a,c.width,c.height));
@@ -2108,10 +2124,8 @@
 
   async function exportCurrentAnnotatedFrame() {
     if (!playback.videoWidth) { toast('请先打开视频'); return; }
-    const canvas = document.createElement('canvas');
-    canvas.width = playback.videoWidth; canvas.height = playback.videoHeight;
+    const canvas = await playback.captureFrame();
     const context = canvas.getContext('2d');
-    context.drawImage(playback.currentFrameCanvas, 0, 0, canvas.width, canvas.height);
     state.annotations.filter(annotation => annotation.frame === currentFrame() && !annotation.hidden).forEach(annotation => drawShape(context, annotation, canvas.width, canvas.height));
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
     if (!blob) { toast('批注帧导出失败'); return; }
@@ -2246,7 +2260,10 @@
       drawAnnotations();
       pumpResponsiveSeek();
     }
-    else { updateUI(true); releaseResponsiveSeekDisplay(); }
+    else {
+      updateUI(true); releaseResponsiveSeekDisplay();
+      if (playback.paused && !state.timelineScrub && !state.scrub) playback.requestSourceFrame?.('exact').catch?.(() => {});
+    }
   }
 
   function beginTimelineScrub(e) {
@@ -2254,7 +2271,7 @@
     e.preventDefault();
     const wasPlaying = !playback.paused && !state.isReverse;
     const wasReverse = state.isReverse;
-    pause();
+    pause('scrub');
     state.timelineScrub = { pointerId: e.pointerId, lastFrame: null, wasPlaying, wasReverse };
     e.currentTarget.setPointerCapture(e.pointerId);
     els.timelineWrap.classList.add('scrubbing');
@@ -2278,7 +2295,7 @@
     els.ruler.classList.remove('scrubbing');
     if (scrub.wasReverse) reverse();
     else if (scrub.wasPlaying) play();
-    else releaseResponsiveSeekDisplay();
+    else { updateMediaOutputTarget('source'); releaseResponsiveSeekDisplay(); }
   }
 
   function cancelTimelineScrub(pointerId) {
@@ -2290,7 +2307,7 @@
     els.ruler.classList.remove('scrubbing');
     if (scrub.wasReverse) reverse();
     else if (scrub.wasPlaying) play();
-    else releaseResponsiveSeekDisplay();
+    else { updateMediaOutputTarget('source'); releaseResponsiveSeekDisplay(); }
   }
 
   function beginScrub(e) {
@@ -2311,7 +2328,7 @@
     const px=e.clientX-state.scrub.startX;
     const movement=Math.hypot(px,e.clientY-state.scrub.startY);
     if(!state.scrub.dragging&&movement<4)return;
-    if(!state.scrub.dragging){state.scrub.dragging=true;pause();els.viewerStage.classList.add('scrubbing-viewer');}
+    if(!state.scrub.dragging){state.scrub.dragging=true;pause('scrub');els.viewerStage.classList.add('scrubbing-viewer');}
     e.preventDefault();
     const factor=e.altKey?1:(e.shiftKey?state.viewerScrubSensitivity*.2:state.viewerScrubSensitivity);
     const next=Math.round(state.scrub.startFrame+px*factor);
@@ -2326,7 +2343,7 @@
     if (wasDragging) {
       if (wasReverse) reverse();
       else if (wasPlaying) play();
-      else releaseResponsiveSeekDisplay();
+      else { updateMediaOutputTarget('source'); releaseResponsiveSeekDisplay(); }
     } else if (e?.type !== 'pointercancel') {
       playback.paused&&!state.isReverse?play():pause();
       scheduleCleanControlsHide();
@@ -2369,6 +2386,8 @@
     $('#pixelInspectorBtn').classList.toggle('active', state.pixelInspector);
     $('#pixelInspectorBtn').setAttribute('aria-pressed', String(state.pixelInspector));
     if (!state.pixelInspector) unlockPixelInspector(true);
+    updateMediaOutputTarget();
+    if (state.pixelInspector) playback.requestSourceFrame?.('pixel-check').catch?.(() => {});
     toast(state.pixelInspector ? '拾色已开启' : '拾色已关闭');
   }
 
@@ -2522,7 +2541,12 @@
     playback.addEventListener('frame',()=>{presentLoadedMediaFrame();if(playback.paused&&!state.timelineScrub&&!state.scrub&&!state.timelineSeek.inFlight)updateUI();if(!playback.requestVideoFrameCallback){captureFrame();scheduleColorRender();}});
     playback.addEventListener('frame',event=>{if(event.detail?.seeked)onResponsiveSeeked();});
     playback.addEventListener('playing',()=>{state.timelineSeek.displayGate=false;state.timelineSeek.displayFrame=null;hideCachedFrame();els.playBtn.classList.add('playing');setStatus('播放中');startPlaybackUiLoop();revealCleanControls();});
-    playback.addEventListener('paused',()=>{els.playBtn.classList.remove('playing');stopPlaybackUiLoop();if(!state.isReverse)setStatus('已暂停');revealCleanControls();});
+    playback.addEventListener('paused',()=>{
+      els.playBtn.classList.remove('playing'); stopPlaybackUiLoop();
+      if (!state.isReverse) setStatus('已暂停');
+      if (!state.isReverse && !state.timelineScrub && !state.scrub) playback.requestSourceFrame?.('pause').catch?.(() => {});
+      revealCleanControls();
+    });
     playback.addEventListener('ended',handlePlaybackEnded);
     els.playBtn.addEventListener('click',()=>playback.paused&&!state.isReverse?play():pause());
     $('#jumpStartBtn').addEventListener('click',()=>seekFrame(0)); $('#stepBack5Btn').addEventListener('click',()=>step(-5));

@@ -316,20 +316,25 @@ function createWindow() {
   const reportWindowInteraction = () => {
     if (!windowInteractionActive) {
       windowInteractionActive = true;
+      mediaService?.setWindowInteraction(true);
       mainWindow.webContents.send('vfx:window-interaction', true);
     }
     clearTimeout(windowInteractionTimer);
     windowInteractionTimer = setTimeout(() => {
       windowInteractionActive = false;
+      mediaService?.setWindowInteraction(false);
       if (!mainWindow?.isDestroyed()) mainWindow.webContents.send('vfx:window-interaction', false);
-    }, 120);
+    }, 150);
   };
   mainWindow.on('will-move', reportWindowInteraction);
   mainWindow.on('will-resize', reportWindowInteraction);
   mainWindow.on('resized', () => {
     clearTimeout(windowInteractionTimer);
     windowInteractionTimer = null;
-    if (windowInteractionActive) mainWindow.webContents.send('vfx:window-interaction', false);
+    if (windowInteractionActive) {
+      mediaService?.setWindowInteraction(false);
+      mainWindow.webContents.send('vfx:window-interaction', false);
+    }
     windowInteractionActive = false;
   });
   if (isSmokeTest) {

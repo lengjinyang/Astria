@@ -46,7 +46,8 @@ module.exports = async function smoke(window, catalog, app) {
       canvas:document.querySelector('#video').tagName==='CANVAS',desktopAPI:!!window.desktopAPI,
       timeline:document.querySelector('.timeline-panel').getBoundingClientRect().bottom<=innerHeight,
       controls:!!document.querySelector('#playBtn'),mediaKind:p.media.mediaKind,backend:p.backend,pixel,contactClosed,
-      sourceFpsApplied:Math.abs(Number(document.querySelector('#fpsInput').value)-(p.media.sourceFps||p.media.fps||24))<.001};
+      sourceFpsApplied:Math.abs(Number(document.querySelector('#fpsInput').value)-(p.media.sourceFps||p.media.fps||24))<.001,
+      hardwareDecoder:p.media.hardwareDecoder||'none'};
     if(!result.ready||!result.canvas||!result.timeline||!pixel||!contactClosed||!result.sourceFpsApplied)throw new Error(JSON.stringify(result));
     return result;
   })()`);

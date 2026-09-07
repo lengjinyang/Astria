@@ -13,6 +13,8 @@
       this.reverseTimer = setInterval(() => this.seek(Math.max(0, this.currentTime - 1 / (this.projectFps || 24))), 1000 / ((this.projectFps || 24) * speed));
     }
     stopReverse() { clearInterval(this.reverseTimer); this.reverseTimer = null; }
+    setOutputTarget() {}
+    requestSourceFrame() { return this.captureFrame(); }
   }
   class HTMLVideoAdapter extends PlaybackAdapter {
     constructor(element = document.createElement('video')) {
@@ -45,17 +47,19 @@
     constructor(element) {
       super(); this.api = window.desktopAPI.media; this.surface = document.createElement('canvas');
       if (element) { this.surface.id = element.id; this.surface.className = element.className; element.replaceWith(this.surface); }
-      this.context = this.surface.getContext('2d', { alpha: false });
+      this.presenter = new FrameSurfaceRenderer(this.surface);
       this.videoWidth = 0; this.videoHeight = 0; this.duration = 0; this.readyState = 0; this.paused = true; this.seeking = false;
       this.time = 0; this.projectFps = 24; this._volume = 1; this._muted = false; this._speed = 1; this.callbacks = new Map(); this.nextCallback = 0;
-      this.generation = 0; this.disposers = []; this.session = null;
+      this.generation = 0; this.disposers = []; this.session = null; this.lastFrameId = -1; this.outputRevision = 0; this.outputTarget = null;
+      this.nextOperationId = 0; this.sourceFrameRequests = new Map();
     }
     async ensureSession() {
       if (!this.session) this.session = this.api.create().then(id => {
         this.id = id;
         this.disposers.push(this.api.onState(event => { if (event.id === id) this.onState(event); }),
           this.api.onFrame(frame => { if (frame.id === id) this.drawSoftware(frame); }),
-          this.api.onSharedTextureFrame(id, frame => { this.resize(frame.displayWidth, frame.displayHeight); this.context.drawImage(frame, 0, 0); }));
+          this.api.onSharedTextureFrame(id, (frame, metadata) => this.drawShared(frame, metadata)));
+        if (this.outputTarget) this.api.setOutputTarget(id, this.outputTarget).catch(error => this.fail(error));
         return id;
       });
       return this.session;
@@ -90,11 +94,44 @@
       else this.emit(event.type, event);
     }
     resize(width, height) { if (this.surface.width !== width || this.surface.height !== height) { this.surface.width = width; this.surface.height = height; } }
+    acceptFrame(frame) {
+      if (frame.purpose === 'capture') return true;
+      if (Number.isSafeInteger(frame.frameId) && frame.frameId <= this.lastFrameId) return false;
+      if (Number.isSafeInteger(frame.outputRevision) && frame.outputRevision < this.outputRevision) return false;
+      if (Number.isSafeInteger(frame.frameId)) this.lastFrameId = frame.frameId;
+      return true;
+    }
+    finishSourceFrame(frame, source) {
+      if (!frame.operationId) return false;
+      const pending = this.sourceFrameRequests.get(frame.operationId);
+      if (!pending) return frame.purpose === 'capture';
+      this.sourceFrameRequests.delete(frame.operationId);
+      clearTimeout(pending.timer);
+      if (frame.purpose === 'capture') {
+        const canvas = document.createElement('canvas');
+        canvas.width = source.displayWidth || source.width || frame.width;
+        canvas.height = source.displayHeight || source.height || frame.height;
+        canvas.getContext('2d', { alpha: false }).drawImage(source, 0, 0, canvas.width, canvas.height);
+        pending.resolve(canvas);
+        return true;
+      }
+      pending.resolve(true);
+      return false;
+    }
+    drawShared(frame, metadata = {}) {
+      if (!this.acceptFrame(metadata)) return;
+      if (this.finishSourceFrame(metadata, frame)) return;
+      this.resize(frame.displayWidth, frame.displayHeight);
+      this.presenter.draw(frame, true);
+    }
     drawSoftware(frame) {
+      if (!this.acceptFrame(frame)) return;
       this.resize(frame.width, frame.height);
       // Upload software-decoded pixels through WebGL2, then expose a compositable canvas.
       if (!this.upload) this.upload = new SoftwareFrameUpload();
-      this.upload.draw(frame); this.context.drawImage(this.upload.canvas, 0, 0);
+      this.upload.draw(frame);
+      if (this.finishSourceFrame(frame, this.upload.canvas)) return;
+      this.presenter.draw(this.upload.canvas);
     }
     play() { this.stopReverse(); return this.call('play'); }
     pause() { this.stopReverse(); if (this.session) this.fire('pause'); }
@@ -103,6 +140,29 @@
     setSpeed(value) { this._speed = value; if (this.session) this.fire('setSpeed', value); }
     setVolume(value) { this._volume = value; if (this.session) this.fire('setVolume', value); }
     setMuted(value) { this._muted = value; if (this.session) this.fire('setMuted', value); }
+    setOutputTarget(width, height, mode = 'viewport') {
+      const even = value => Math.max(2, Math.round(Number(value) / 2) * 2);
+      const next = { width: even(width), height: even(height), mode };
+      if (!['viewport', 'source', 'scrub'].includes(mode) || !Number.isFinite(next.width) || !Number.isFinite(next.height)) return;
+      if (this.outputTarget && this.outputTarget.width === next.width && this.outputTarget.height === next.height && this.outputTarget.mode === mode) return;
+      this.outputTarget = { ...next, revision: ++this.outputRevision };
+      if (this.session) this.fire('setOutputTarget', this.outputTarget);
+    }
+    requestSourceFrame(purpose = 'exact') {
+      const operationId = ++this.nextOperationId;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.sourceFrameRequests.delete(operationId);
+          reject(new Error('源分辨率画面请求超时'));
+        }, 5000);
+        this.sourceFrameRequests.set(operationId, { resolve, reject, timer });
+        this.call('requestSourceFrame', { operationId, purpose }).catch(error => {
+          const pending = this.sourceFrameRequests.get(operationId);
+          if (!pending) return;
+          clearTimeout(pending.timer); this.sourceFrameRequests.delete(operationId); pending.reject(error);
+        });
+      });
+    }
     setProjectFps(fps) {
       const changed = this.projectFps !== fps; this.projectFps = fps;
       if (changed && this.media?.mediaKind === 'sequence' && this.readyState) {
@@ -119,11 +179,56 @@
     requestVideoFrameCallback(callback) { const id = ++this.nextCallback; this.callbacks.set(id, callback); return id; }
     cancelVideoFrameCallback(id) { this.callbacks.delete(id); }
     async captureFrame() {
-      const result = await this.call('captureFrame');
-      if (!result.currentCanvas) this.drawSoftware(result);
-      return super.captureFrame();
+      return this.requestSourceFrame('capture');
     }
-    async destroy() { this.stopReverse(); for (const dispose of this.disposers) dispose(); this.callbacks.clear(); if (this.session) await this.api.destroy(await this.session); this.upload?.destroy(); }
+    async destroy() {
+      this.stopReverse(); for (const dispose of this.disposers) dispose(); this.callbacks.clear();
+      for (const pending of this.sourceFrameRequests.values()) { clearTimeout(pending.timer); pending.reject(new Error('播放器已关闭')); }
+      this.sourceFrameRequests.clear();
+      if (this.session) await this.api.destroy(await this.session); this.upload?.destroy(); this.presenter.destroy();
+    }
+  }
+  class FrameSurfaceRenderer {
+    constructor(canvas) {
+      this.canvas = canvas;
+      const gl = this.gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true, alpha: false, antialias: false, desynchronized: true });
+      if (!gl) {
+        this.context = canvas.getContext('2d', { alpha: false });
+        if (!this.context) throw new Error('画面 Canvas 不可用');
+        return;
+      }
+      const shader = (type, source) => {
+        const value = gl.createShader(type); gl.shaderSource(value, source); gl.compileShader(value);
+        if (!gl.getShaderParameter(value, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(value));
+        return value;
+      };
+      this.program = gl.createProgram();
+      gl.attachShader(this.program, shader(gl.VERTEX_SHADER, '#version 300 es\n out vec2 uv; void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));uv=vec2(p.x,1.-p.y);gl_Position=vec4(p*2.-1.,0,1);}'));
+      gl.attachShader(this.program, shader(gl.FRAGMENT_SHADER, '#version 300 es\n precision highp float;in vec2 uv;uniform sampler2D pixels;out vec4 color;void main(){color=texture(pixels,uv);}'));
+      gl.linkProgram(this.program);
+      if (!gl.getProgramParameter(this.program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(this.program));
+      this.texture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this.texture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    }
+    draw(source, finish = false) {
+      if (!this.gl) {
+        this.context.drawImage(source, 0, 0, this.canvas.width, this.canvas.height);
+        return;
+      }
+      const gl = this.gl;
+      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      gl.useProgram(this.program); gl.bindTexture(gl.TEXTURE_2D, this.texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      if (finish) gl.finish(); else gl.flush();
+    }
+    destroy() {
+      if (!this.gl) return;
+      this.gl.deleteTexture(this.texture); this.gl.deleteProgram(this.program);
+    }
   }
   class SoftwareFrameUpload {
     constructor() {

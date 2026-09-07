@@ -24,6 +24,10 @@ function number(value, min, max) {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) throw new Error('无效播放参数');
   return value;
 }
+function integer(value, min, max) {
+  if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error('无效播放参数');
+  return value;
+}
 
 class MediaService {
   constructor(app, catalog, getWindow) {
@@ -45,6 +49,8 @@ class MediaService {
       setSpeed: (event, id, speed) => this.session(event, id).player.setSpeed(number(speed, 0.01, 100)),
       setVolume: (event, id, volume) => this.session(event, id).player.setVolume(number(volume, 0, 1) * 100),
       setMuted: (event, id, muted) => { if (typeof muted !== 'boolean') throw new Error('无效静音参数'); this.session(event, id).player.setMuted(muted); },
+      setOutputTarget: (event, id, target) => this.session(event, id).setOutputTarget(target),
+      requestSourceFrame: (event, id, request) => this.session(event, id).requestSourceFrame(request),
       captureFrame: (event, id) => this.session(event, id).captureFrame(),
       destroy: async (event, id) => { await this.session(event, id).destroy(); this.sessions.delete(id); }
     };
@@ -62,6 +68,9 @@ class MediaService {
     if (!session || session.owner !== event.sender) throw new Error('无效媒体会话');
     return session;
   }
+  setWindowInteraction(active) {
+    for (const session of this.sessions.values()) session.setWindowInteraction(!!active);
+  }
   async dispose() { this.closing = true; await Promise.all([...this.sessions.values()].map(s => s.destroy())); this.sessions.clear(); }
 }
 
@@ -69,6 +78,8 @@ class Session {
   constructor(core, owner, catalog) {
     this.id = randomUUID(); this.core = core; this.owner = owner; this.catalog = catalog;
     this.mode = sharedTexture && process.env.ASTRIA_RENDER_BACKEND !== 'software' ? 'shared-texture' : 'software'; this.closed = false; this.pending = false;
+    this.outputTarget = { width: 0, height: 0, mode: 'source', revision: 0 };
+    this.exactFrames = []; this.frameId = 0; this.inFlight = 0; this.releases = new Set(); this.windowInteraction = false; this.lockedOutputTarget = null;
     try { this.player = new core.MpvPlayer({ mode: this.mode }); }
     catch (error) {
       if (this.mode !== 'shared-texture') throw error;
@@ -99,7 +110,7 @@ class Session {
         const info = this.player.getInfo(); this.loaded = true;
         Object.assign(this.descriptor, { width: info.width || 0, height: info.height || 0,
           duration: this.descriptor.mediaKind === 'sequence' ? this.descriptor.duration : info.duration || 0,
-          codec: info['video-codec'], container: info['file-format'] });
+          codec: info['video-codec'], container: info['file-format'], hardwareDecoder: info['hwdec-current'] || 'none' });
         if (this.descriptor.mediaKind === 'video') {
           this.descriptor.sourceFps = info['container-fps'] || 24;
           this.descriptor.fps = this.descriptor.sourceFps;
@@ -114,10 +125,17 @@ class Session {
       }
       if (event.type === 'video-reconfig' && this.loaded) {
         const info = this.player.getInfo();
+        let metadataChanged = false;
         if (info.width && info.height && (this.descriptor.width !== info.width || this.descriptor.height !== info.height)) {
           Object.assign(this.descriptor, { width: info.width, height: info.height });
-          this.send('metadata', { media: this.descriptor, backend: this.mode });
+          metadataChanged = true;
         }
+        const hardwareDecoder = info['hwdec-current'] || 'none';
+        if (this.descriptor.hardwareDecoder !== hardwareDecoder) {
+          this.descriptor.hardwareDecoder = hardwareDecoder;
+          metadataChanged = true;
+        }
+        if (metadataChanged) this.send('metadata', { media: this.descriptor, backend: this.mode });
         this.queueFrame();
       }
       if (event.type === 'property-change') {
@@ -128,37 +146,136 @@ class Session {
         }
         if (event.name === 'eof-reached' && event.data) this.send('ended');
       }
-      if (event.type === 'playback-restart') { this.seeked = true; this.queueFrame(); }
+      if (event.type === 'playback-restart') {
+        const hardwareDecoder = this.player.getInfo()['hwdec-current'] || 'none';
+        if (this.descriptor.hardwareDecoder !== hardwareDecoder) {
+          this.descriptor.hardwareDecoder = hardwareDecoder;
+          this.send('metadata', { media: this.descriptor, backend: this.mode });
+        }
+        this.seeked = true; this.queueFrame();
+      }
     }
   }
-  queueFrame() {
-    this.pending = true;
+  setOutputTarget(target) {
+    if (!target || typeof target !== 'object' || !['viewport', 'source', 'scrub'].includes(target.mode)) throw new Error('无效输出目标');
+    const next = {
+      width: integer(target.width, 2, 16384),
+      height: integer(target.height, 2, 16384),
+      mode: target.mode,
+      revision: integer(target.revision, 0, Number.MAX_SAFE_INTEGER)
+    };
+    if (next.revision < this.outputTarget.revision) return;
+    const changed = next.width !== this.outputTarget.width || next.height !== this.outputTarget.height ||
+      next.mode !== this.outputTarget.mode || next.revision !== this.outputTarget.revision;
+    this.outputTarget = next;
+    if (changed && !this.windowInteraction) this.queueFrame();
+  }
+  setWindowInteraction(active) {
+    if (this.windowInteraction === active) return;
+    this.windowInteraction = active;
+    if (active) this.lockedOutputTarget = { ...this.outputTarget };
+    else {
+      this.lockedOutputTarget = null;
+    }
+  }
+  requestSourceFrame(request) {
+    if (!request || typeof request !== 'object') throw new Error('无效源帧请求');
+    const operationId = integer(request.operationId, 1, Number.MAX_SAFE_INTEGER);
+    const purpose = String(request.purpose || 'exact');
+    if (!['exact', 'pause', 'capture', 'pixel-check'].includes(purpose)) throw new Error('无效源帧用途');
+    return new Promise((resolve, reject) => {
+      this.exactFrames.push({ operationId, purpose, resolve, reject, source: true });
+      this.queueFrame(false);
+    });
+  }
+  outputDimensions(request) {
+    const sourceWidth = Math.max(2, this.descriptor.width || 2);
+    const sourceHeight = Math.max(2, this.descriptor.height || 2);
+    if (request?.source) return { width: sourceWidth, height: sourceHeight, mode: 'source', revision: this.outputTarget.revision };
+    const target = this.lockedOutputTarget || this.outputTarget;
+    if (target.mode === 'source' || !target.width || !target.height) return { width: sourceWidth, height: sourceHeight, mode: 'source', revision: target.revision };
+    let scale = Math.min(1, target.width / sourceWidth, target.height / sourceHeight);
+    if (target.mode === 'scrub') scale = Math.min(scale, 960 / sourceWidth, 540 / sourceHeight);
+    const even = value => Math.max(2, Math.round(value / 2) * 2);
+    return { width: even(sourceWidth * scale), height: even(sourceHeight * scale), mode: target.mode, revision: target.revision };
+  }
+  queueFrame(markPending = true) {
+    if (markPending) this.pending = true;
     if (this.pumping || !this.loaded || this.closed) return;
-    this.pumping = this.pump().finally(() => { this.pumping = null; if (this.pending && !this.closed) this.queueFrame(); });
+    this.pumping = this.pump().finally(() => {
+      this.pumping = null;
+      if ((this.pending || this.exactFrames.length) && !this.closed && !this.waitingForSlot) this.queueFrame(false);
+    });
   }
   async pump() {
-    while (this.pending && !this.closed) {
-      this.pending = false;
-      const { width, height } = this.descriptor;
+    while ((this.pending || this.exactFrames.length) && !this.closed) {
+      const request = this.exactFrames.length ? this.exactFrames.shift() : null;
+      if (!request) this.pending = false;
+      const { width, height, mode, revision } = this.outputDimensions(request);
       if (!width || !height) return;
       try {
+        const metadata = {
+          id: this.id,
+          frameId: ++this.frameId,
+          operationId: request?.operationId || null,
+          purpose: request?.purpose || mode,
+          mediaTime: this.time || 0,
+          outputRevision: revision,
+          width,
+          height
+        };
         if (this.mode === 'shared-texture') {
-          let texture;
+          const renderPlayer = this.player;
+          const textureInfo = renderPlayer.renderSharedTexture(width, height);
+          if (textureInfo?.busy) {
+            this.frameId -= 1;
+            if (request) this.exactFrames.unshift(request); else this.pending = true;
+            this.waitingForSlot = true;
+            return;
+          }
+          const slotId = Number.isInteger(textureInfo?.slotId) ? textureInfo.slotId : null;
+          let texture, releasedResolve;
           const released = new Promise(resolve => {
-            texture = sharedTexture.importSharedTexture({ textureInfo: this.player.renderSharedTexture(width, height), allReferencesReleased: resolve });
+            releasedResolve = resolve;
           });
-          try { await sharedTexture.sendSharedTexture({ frame: this.owner.mainFrame, importedSharedTexture: texture }, this.id); }
+          this.releases.add(released);
+          const releaseSlot = () => {
+            if (slotId !== null) renderPlayer.releaseSharedTexture(slotId);
+            this.inFlight = Math.max(0, this.inFlight - 1);
+            this.waitingForSlot = false;
+            this.releases.delete(released);
+            releasedResolve();
+            if (!this.closed) this.queueFrame(false);
+          };
+          try {
+            texture = sharedTexture.importSharedTexture({ textureInfo, allReferencesReleased: releaseSlot });
+            this.inFlight += 1;
+          } catch (error) {
+            if (slotId !== null) renderPlayer.releaseSharedTexture(slotId);
+            this.releases.delete(released);
+            releasedResolve();
+            throw error;
+          }
+          try { await sharedTexture.sendSharedTexture({ frame: this.owner.mainFrame, importedSharedTexture: texture }, this.id, metadata); }
           finally { texture.release(); }
-          await released;
+          // macOS and the diagnostic single-texture path do not expose slots.
+          if (slotId === null) await released;
         } else {
           const frame = this.player.renderFrame(width, height);
-          this.owner.send('media:frame', { id: this.id, ...frame });
+          this.owner.send('media:frame', { ...metadata, ...frame });
         }
-        this.send('frame', { time: this.time || 0, seeked: !!this.seeked }); this.seeked = false;
+        if (request?.purpose !== 'capture' && metadata.outputRevision >= this.outputTarget.revision) {
+          this.send('frame', { ...metadata, time: metadata.mediaTime, seeked: !!this.seeked });
+          this.seeked = false;
+        }
+        request?.resolve(metadata);
       } catch (error) {
+        request?.reject(error);
         if (this.mode === 'shared-texture' && !this.closed) {
           const position = this.time || 0, paused = this.paused;
-          this.player.setEventCallback(); this.player.setUpdateCallback(); this.player.destroy();
+          this.player.setEventCallback(); this.player.setUpdateCallback();
+          if (this.releases.size) await Promise.all([...this.releases]);
+          this.player.destroy();
           this.mode = 'software'; this.player = new this.core.MpvPlayer({ mode: 'software' });
           this.attach(); this.restore = { position, paused };
           await this.open(this.descriptor.mediaId, this.descriptor.fps);
@@ -176,7 +293,10 @@ class Session {
   async destroy() {
     if (this.closed) return;
     this.closed = true; this.player.setEventCallback(); this.player.setUpdateCallback();
+    const error = new Error('媒体会话已关闭');
+    for (const request of this.exactFrames.splice(0)) request.reject(error);
     if (this.pumping) await this.pumping;
+    if (this.releases.size) await Promise.all([...this.releases]);
     this.player.destroy();
   }
 }
