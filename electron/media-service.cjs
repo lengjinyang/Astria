@@ -38,6 +38,7 @@ class MediaService {
       open: (event, id, mediaId, fps) => this.session(event, id).open(mediaId, number(fps, 1, 240)),
       play: (event, id) => this.session(event, id).player.play(),
       pause: (event, id) => this.session(event, id).player.pause(),
+      stop: (event, id) => this.session(event, id).player.stop(),
       seek: (event, id, seconds) => this.session(event, id).player.seek(number(seconds, 0, 1e10)),
       step: (event, id, direction) => { if (direction !== -1 && direction !== 1) throw new Error('无效逐帧方向'); const session = this.session(event, id); session.stepPending = true; session.player.step(direction); },
       setSpeed: (event, id, speed) => this.session(event, id).player.setSpeed(number(speed, 0.01, 100)),
@@ -64,6 +65,9 @@ class MediaService {
   }
   setWindowInteraction(active) {
     for (const session of this.sessions.values()) session.setWindowInteraction(!!active);
+  }
+  setPresentationSuspended(suspended) {
+    for (const session of this.sessions.values()) session.setPresentationSuspended(!!suspended);
   }
   async dispose() { this.closing = true; await Promise.all([...this.sessions.values()].map(s => s.destroy())); this.sessions.clear(); }
 }
@@ -94,8 +98,18 @@ class Session {
   send(type, data = {}) { if (!this.closed && !this.owner.isDestroyed()) this.owner.send('media:state', { id: this.id, type, ...data }); }
   async open(mediaId, fps) {
     const generation = this.generation = (this.generation || 0) + 1;
-    const entry = await this.catalog.source(mediaId, fps);
-    if (this.closed || generation !== this.generation) return;
+    if (this.mediaId && this.mediaId !== mediaId) await this.catalog.release(this.mediaId, this.id);
+    this.mediaId = mediaId;
+    let entry;
+    try { entry = await this.catalog.source(mediaId, fps, this.id); }
+    catch (error) {
+      if (this.mediaId === mediaId) { await this.catalog.release(mediaId, this.id); this.mediaId = null; }
+      throw error;
+    }
+    if (this.closed || generation !== this.generation) {
+      if (this.mediaId !== mediaId) await this.catalog.release(mediaId, this.id);
+      return;
+    }
     this.descriptor = entry.descriptor; this.source = entry.source; this.loaded = false;
     this.send('loading'); this.player.pause(); this.player.setFps(fps); this.loadId = this.player.open(this.source);
     return this.descriptor;
@@ -177,6 +191,11 @@ class Session {
       this.lockedOutputTarget = null;
     }
   }
+  setPresentationSuspended(suspended) {
+    if (this.presentationSuspended === suspended) return;
+    this.presentationSuspended = suspended;
+    if (!suspended) this.queueFrame();
+  }
   requestSourceFrame(request) {
     if (!request || typeof request !== 'object') throw new Error('无效源帧请求');
     const operationId = integer(request.operationId, 1, Number.MAX_SAFE_INTEGER);
@@ -193,14 +212,13 @@ class Session {
     if (request?.source) return { width: sourceWidth, height: sourceHeight, mode: 'source', revision: this.outputTarget.revision };
     const target = this.lockedOutputTarget || this.outputTarget;
     if (target.mode === 'source' || !target.width || !target.height) return { width: sourceWidth, height: sourceHeight, mode: 'source', revision: target.revision };
-    let scale = Math.min(1, target.width / sourceWidth, target.height / sourceHeight);
-    if (target.mode === 'scrub') scale = Math.min(scale, 960 / sourceWidth, 540 / sourceHeight);
+    const scale = Math.min(1, target.width / sourceWidth, target.height / sourceHeight);
     const even = value => Math.max(2, Math.round(value / 2) * 2);
     return { width: even(sourceWidth * scale), height: even(sourceHeight * scale), mode: target.mode, revision: target.revision };
   }
   queueFrame(markPending = true) {
     if (markPending) this.pending = true;
-    if (this.pumping || !this.loaded || this.closed) return;
+    if (this.pumping || !this.loaded || this.closed || this.presentationSuspended) return;
     this.pumping = this.pump().finally(() => {
       this.pumping = null;
       if ((this.pending || this.exactFrames.length) && !this.closed && !this.waitingForSlot) this.queueFrame(false);
@@ -297,6 +315,7 @@ class Session {
     if (this.pumping) await this.pumping;
     if (this.releases.size) await Promise.all([...this.releases]);
     this.player.destroy();
+    if (this.mediaId) await this.catalog.release(this.mediaId, this.id);
   }
 }
 module.exports = { MediaService, runtimePath, loadCore };

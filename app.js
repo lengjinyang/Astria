@@ -47,18 +47,18 @@
     fileName: '', fileMeta: null, fps: 24, fpsMode: 'source', fpsModeExplicit: false, bookmarks: [], annotations: [], selectedBookmarkIds: [],
     selectedAnnotationId: null, selectedAnnotationFrame: null, activeTool: 'select', annotationColor: '#8b5cf6', annotationVisible: true,
     timelineZoom: 1, reverseTimer: null, reverseSeekInFlight: false, reverseAnchorFrame: 0, reverseAnchorTime: 0, reverseFrame: 0, playbackUiRaf: null, isReverse: false, scrub: null, draw: null, favoriteOnly: false,
-    view: 'list', autosave: true, currentObjectUrl: null, saveTimer: null, contextBookmarkId: null,
-    timelineScrub: null, timelineSeek: { pendingFrame: null, inFlight: false, displayGate: false, displayFrame: null }, annotationScope: 'all',
+    view: 'list', autosave: true, currentObjectUrl: null, saveTimer: null, playbackPositionSaveTimer: null, lastSavedPlaybackPosition: null, contextBookmarkId: null,
+    timelineScrub: null, timelineSeek: { pendingFrame: null, inFlight: false, displayGate: false, displayFrame: null, resumeAfterSeek: null }, annotationScope: 'all',
     lumaMode: false, lumaContrast: 1, viewerScrubSensitivity: 0.3, lastFrameContent: null,
     volume: 1, muted: false, previousVolume: 1, loopInFrame: null, loopOutFrame: null,
     frameCache: new Map(), frameCacheCapture: null, frameCachePending: false, frameCacheHandle: null,
-    frameCacheMax: 80, frameCacheGeneration: 0, currentMediaKey: null, sourcePath: null,
+    frameCacheMax: 24, frameCacheGeneration: 0, currentMediaKey: null, sourcePath: null,
     cleanMode: false, cleanControlsTimer: null, cleanPreviousTool: 'select',
     quickAnnotationTool: 'brush', annotationSize: 4, annotationUndo: [], quickGesture: null, pendingTextAnnotation: null,
     viewerZoomMode: 'fit', viewerZoom: 1, viewerPan: { x: 0, y: 0 }, viewerPanGesture: null,
     endBehavior: 'stop', panelOpen: false, viewerResizeObserver: null, viewerResizeRaf: null,
     playbackSpeed: 1, shortcuts: { ...DEFAULT_SHORTCUTS }, shortcutRecording: null, pixelInspector: false, timelineHoverPreview: true, timelineHoverPreviewSize: 196,
-    autoplayOnOpen: true, startupMode: 'clean', startupModeApplied: false,
+    autoplayOnOpen: true, rememberPlaybackPosition: true, pendingResumePosition: null, resumeSeekPending: false, resumeTargetPosition: null, startupMode: 'clean', startupModeApplied: false,
 
     pixelInspectorLocked: false, pixelSample: null, pixelSampleCanvas: null,
     annotationThumbnails: {},
@@ -67,7 +67,11 @@
     mediaLoadGeneration: 0, mediaAwaitingMetadata: false, mediaAwaitingFirstFrame: false, mediaReplacing: false, mediaTransitionTimer: null, mediaPresentationTimer: null
     ,colorPreset: 'original', colorRenderer: null, colorLuts: new Map(), colorRenderPending: false,
     guidesMaster: true, guideThirds: false, guideGolden: false, guideSpiral: false, guideSpiralRotation: 0, guideCenter: false, guideDiagonal: false, guideTriangle: false, guideSymmetry: false, guideActionSafe: false, guideTitleSafe: false, guideAspect: 'off', guideOpacity: .55, guideMaskStrength: .55,
-    contactCandidates: [], contactSheetCancel: false, contactSheetBusy: false
+    contactCandidates: [], contactSheetCancel: false, contactSheetBusy: false,
+    activeMarkerFrame: null, bookmarkMarkersByFrame: new Map(), annotationMarkersByFrame: new Map(),
+    annotationIndexSource: null, annotationIndexLength: -1, annotationIndex: new Map(), viewerLayout: null,
+    pixelInspectorRaf: null, pixelInspectorPending: null, helpReturnFocus: null, contactReturnFocus: null,
+    mediaProbing: false, mediaProbeGeneration: 0, activeMediaProbeId: null, cancelledMediaProbeIds: new Set()
   };
 
   const uid = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -76,12 +80,43 @@
   const totalFrames = () => playback.media?.mediaKind === 'sequence' ? playback.media.totalFrames : Math.max(1, Math.round((playback.duration || 0) * state.fps));
   const lastFrame = () => Math.max(0, totalFrames() - 1);
   const currentFrame = () => clamp(state.isReverse ? Math.round(state.reverseFrame) : Math.round(playback.currentTime * state.fps), 0, lastFrame());
+  const frameSeekTime = frame => Math.min((clamp(Math.round(frame), 0, lastFrame()) + .25) / Math.max(1, state.fps), Math.max(0, playback.duration - .001));
   const sourceFrame = frame => Math.round(frame) + (state.fileMeta?.sourceFrameOffset || 0);
+  function frameIsMissing(sourceNumber) {
+    const ranges = playback.media?.missingFrameRanges;
+    if (Array.isArray(ranges)) {
+      let low = 0, high = ranges.length - 1;
+      while (low <= high) {
+        const middle = (low + high) >> 1;
+        const [start, end] = ranges[middle];
+        if (sourceNumber < start) high = middle - 1;
+        else if (sourceNumber > end) low = middle + 1;
+        else return true;
+      }
+      return false;
+    }
+    return playback.media?.missingFrames?.includes(sourceNumber) || false;
+  }
   const missingFrameNotice = document.createElement('div');
   missingFrameNotice.className = 'missing-frame-notice'; missingFrameNotice.hidden = true; els.mediaSurface.appendChild(missingFrameNotice);
   const mediaTransitionCanvas = document.createElement('canvas');
   mediaTransitionCanvas.className = 'media-transition-canvas'; mediaTransitionCanvas.setAttribute('aria-hidden', 'true'); els.mediaSurface.appendChild(mediaTransitionCanvas);
   const selectedBookmark = () => state.bookmarks.find(b => state.selectedBookmarkIds.includes(b.id));
+
+  function annotationsByFrame() {
+    if (state.annotationIndexSource === state.annotations && state.annotationIndexLength === state.annotations.length) return state.annotationIndex;
+    const index = new Map();
+    for (const annotation of state.annotations) {
+      if (!index.has(annotation.frame)) index.set(annotation.frame, []);
+      index.get(annotation.frame).push(annotation);
+    }
+    state.annotationIndexSource = state.annotations;
+    state.annotationIndexLength = state.annotations.length;
+    state.annotationIndex = index;
+    return index;
+  }
+
+  function annotationsAt(frame) { return annotationsByFrame().get(frame) || []; }
 
   function formatTimecode(seconds) {
     if (!Number.isFinite(seconds)) return '00:00:00:00';
@@ -95,6 +130,43 @@
     if (!Number.isFinite(seconds)) return '00:00';
     const s = Math.floor(seconds % 60), m = Math.floor(seconds / 60) % 60, h = Math.floor(seconds / 3600);
     return h ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}` : `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  }
+
+  function parseTimecode(value) {
+    const text = String(value || '').trim();
+    if (/^\d+(?:\.\d+)?$/.test(text)) return Number(text);
+    const parts = text.split(':').map(Number);
+    if (parts.length !== 4 || parts.some(part => !Number.isFinite(part))) return null;
+    const [hours, minutes, seconds, frames] = parts;
+    if (hours < 0 || minutes < 0 || minutes >= 60 || seconds < 0 || seconds >= 60 || frames < 0 || frames >= Math.ceil(state.fps)) return null;
+    return hours * 3600 + minutes * 60 + seconds + frames / state.fps;
+  }
+
+  function resetPositionEditors() {
+    const time = playback.currentTime || 0;
+    els.currentTimecode.textContent = formatTimecode(time);
+    els.frameReadout.textContent = `FRAME ${String(sourceFrame(currentFrame())).padStart(5, '0')}`;
+  }
+
+  function commitPositionEditor(element, kind) {
+    if (!playback.duration) { resetPositionEditors(); return; }
+    let frame = null;
+    if (kind === 'frame') {
+      const value = Number(String(element.textContent || '').replace(/[^\d+-]/g, ''));
+      if (Number.isFinite(value)) frame = value - (state.fileMeta?.sourceFrameOffset || 0);
+    } else {
+      const seconds = parseTimecode(element.textContent);
+      if (Number.isFinite(seconds)) frame = Math.round(seconds * state.fps);
+    }
+    if (!Number.isFinite(frame)) { toast('请输入有效的帧号或 HH:MM:SS:FF 时间码'); resetPositionEditors(); return; }
+    seekFrame(clamp(Math.round(frame), 0, lastFrame()));
+    resetPositionEditors();
+  }
+
+  function selectEditorText(element) {
+    const selection = getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(element); selection.removeAllRanges(); selection.addRange(range);
   }
 
   function toast(message) {
@@ -188,7 +260,7 @@
     else if (!ready && topbar.parentElement !== shell) shell.prepend(topbar);
     document.body.classList.toggle('media-ready', ready);
     $$('.transport button, .transport input, .transport select, .annotation-toolbar button, .annotation-toolbar input, .luma-control button, #lumaContrast, #resetTimelineZoomBtn, #addBookmarkBtn, #cleanModeBtn, #pixelInspectorBtn, #exportAnnotatedFrameBtn').forEach(control => {
-      const alwaysEnabled = ['togglePanelBtn','openDefaultAppsBtn','autoplaySwitch','startupModeSelect','hoverPreviewSwitch','previewSizeRange','previewSizeNumber','previewSizeDownBtn','previewSizeUpBtn','previewSizeResetBtn'].includes(control.id);
+      const alwaysEnabled = ['togglePanelBtn','openDefaultAppsBtn','autoplaySwitch','rememberPlaybackPositionSwitch','startupModeSelect','hoverPreviewSwitch','previewSizeRange','previewSizeNumber','previewSizeDownBtn','previewSizeUpBtn','previewSizeResetBtn'].includes(control.id);
       control.disabled = alwaysEnabled ? false : !ready;
       control.setAttribute('aria-disabled', String(alwaysEnabled ? false : !ready));
     });
@@ -237,7 +309,7 @@
     const frameTexture=gl.createTexture();gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,frameTexture);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
     const lutTexture=gl.createTexture();gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_3D,lutTexture);gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_WRAP_R,gl.CLAMP_TO_EDGE);
     gl.useProgram(program);gl.uniform1i(gl.getUniformLocation(program,'frame'),0);gl.uniform1i(gl.getUniformLocation(program,'lut'),1);
-    state.colorRenderer={gl,program,vao,frameTexture,lutTexture,preset:null};
+    state.colorRenderer={gl,program,vao,frameTexture,lutTexture,preset:null,frameWidth:0,frameHeight:0,maxTextureSize:gl.getParameter(gl.MAX_TEXTURE_SIZE)||4096,lumaUniform:gl.getUniformLocation(program,'doLuma'),contrastUniform:gl.getUniformLocation(program,'contrast')};
     els.colorCanvas.addEventListener('webglcontextlost',event=>{event.preventDefault();state.colorRenderer=null;setColorPreset('original',false);toast('GPU 色彩查看已回到原始显示');},{once:true});
     return state.colorRenderer;
   }
@@ -277,13 +349,13 @@
   function sampleAmbient(source) {
     if (!ambient.enabled || document.hidden || document.body.classList.contains('window-interacting') || playback.readyState < 2 || !playback.videoWidth) return;
     const now = performance.now();
-    if (now - ambient.lastSample < 80) return;
+    if (now - ambient.lastSample < 160) return;
     ambient.lastSample = now;
     source ||= els.cacheCanvas.classList.contains('visible') ? els.cacheCanvas : els.video;
     try {
       ambientTargetCtx.filter = state.lumaMode && source !== els.colorCanvas ? `grayscale(1) contrast(${state.lumaContrast})` : 'none';
       ambientTargetCtx.drawImage(source, 0, 0, 64, 36);
-      ambient.steps = 22;
+      ambient.steps = 8;
       if (ambient.timer === null) blendAmbient();
     } catch { resetAmbient(); }
   }
@@ -301,11 +373,11 @@
     state.colorRenderPending=false;if(state.colorPreset==='original'||!playback.videoWidth)return;
     try{
       const renderer=createColorRenderer(),gl=renderer.gl,source=els.cacheCanvas.classList.contains('visible')?els.cacheCanvas:els.video;
-      const max=gl.getParameter(gl.MAX_TEXTURE_SIZE)||4096,scale=Math.min(1,max/playback.videoWidth,max/playback.videoHeight),width=Math.max(1,Math.round(playback.videoWidth*scale)),height=Math.max(1,Math.round(playback.videoHeight*scale));
+      const sourceWidth=source.videoWidth||source.width||playback.videoWidth,sourceHeight=source.videoHeight||source.height||playback.videoHeight,scale=Math.min(1,renderer.maxTextureSize/sourceWidth,renderer.maxTextureSize/sourceHeight),width=Math.max(1,Math.round(sourceWidth*scale)),height=Math.max(1,Math.round(sourceHeight*scale));
       if(els.colorCanvas.width!==width||els.colorCanvas.height!==height){els.colorCanvas.width=width;els.colorCanvas.height=height;gl.viewport(0,0,width,height);}
-      gl.useProgram(renderer.program);gl.bindVertexArray(renderer.vao);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,renderer.frameTexture);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGB,gl.RGB,gl.UNSIGNED_BYTE,source);
+      gl.useProgram(renderer.program);gl.bindVertexArray(renderer.vao);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,renderer.frameTexture);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);if(renderer.frameWidth===sourceWidth&&renderer.frameHeight===sourceHeight)gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,gl.RGB,gl.UNSIGNED_BYTE,source);else{gl.texImage2D(gl.TEXTURE_2D,0,gl.RGB,gl.RGB,gl.UNSIGNED_BYTE,source);renderer.frameWidth=sourceWidth;renderer.frameHeight=sourceHeight;}
       if(renderer.preset!==state.colorPreset){gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_3D,renderer.lutTexture);gl.texImage3D(gl.TEXTURE_3D,0,gl.RGBA8,64,64,64,0,gl.RGBA,gl.UNSIGNED_BYTE,generateColorLut(state.colorPreset));renderer.preset=state.colorPreset;}
-      gl.uniform1i(gl.getUniformLocation(renderer.program,'doLuma'),state.lumaMode?1:0);gl.uniform1f(gl.getUniformLocation(renderer.program,'contrast'),state.lumaContrast);gl.drawArrays(gl.TRIANGLES,0,6);els.colorCanvas.classList.add('active');sampleAmbient(els.colorCanvas);
+      gl.uniform1i(renderer.lumaUniform,state.lumaMode?1:0);gl.uniform1f(renderer.contrastUniform,state.lumaContrast);gl.drawArrays(gl.TRIANGLES,0,6);els.colorCanvas.classList.add('active');sampleAmbient(els.colorCanvas);
     }catch(error){console.warn('Color view unavailable',error);state.colorPreset='original';els.colorCanvas.classList.remove('active');$('#colorPresetSelect').value='original';toast('GPU 不可用，已回到原始显示');}
   }
   function scheduleColorRender(){if(state.colorPreset==='original'){sampleAmbient();return;}if(state.colorRenderPending)return;state.colorRenderPending=true;requestAnimationFrame(renderColorView);}
@@ -347,6 +419,8 @@
   }
 
   let classicTopbarTimer = null;
+  let classicTopbarRaf = null;
+  let classicTopbarPointer = null;
   let classicPointerInside = false;
   let classicWindowOutside = false;
   const nativeClassicPointer = !!desktopAPI?.onTitlebarHover;
@@ -383,6 +457,16 @@
     classicPointerInside = (event.clientX >= rect.left && event.clientX <= rect.right &&
       event.clientY >= rect.top && event.clientY <= triggerBottom) || (revealed && !!event.target.closest?.('.topbar'));
     refreshClassicTopbar();
+  }
+  function scheduleClassicTopbarUpdate(event) {
+    if (nativeClassicPointer) return;
+    classicTopbarPointer = { clientX: event.clientX, clientY: event.clientY, target: event.target };
+    if (classicTopbarRaf !== null) return;
+    classicTopbarRaf = requestAnimationFrame(() => {
+      classicTopbarRaf = null;
+      const pointer = classicTopbarPointer; classicTopbarPointer = null;
+      if (pointer) updateClassicTopbar(pointer);
+    });
   }
   function closeClassicTopbarMenus() {
     $$('.topbar details[open]').forEach(menu => { menu.open = false; });
@@ -430,7 +514,7 @@
     revealCleanControls();
     requestAnimationFrame(() => { resizeCanvas(); updatePlaybackUI(); });
   }
-  function pause(outputMode = 'source') { playback.pause(); stopReverse(); updateMediaOutputTarget(outputMode); }
+  function pause(outputMode = null) { playback.pause(); stopReverse(); updateMediaOutputTarget(outputMode); }
   function hasLoopRange() {
     return Number.isFinite(state.loopInFrame) && Number.isFinite(state.loopOutFrame) && state.loopOutFrame > state.loopInFrame;
   }
@@ -486,6 +570,7 @@
     }
 
     targetFrame = clamp(Math.round(targetFrame), loopStartFrame, loopEndFrame);
+    const decodedFrame = Math.round(playback.currentTime * state.fps);
     state.reverseFrame = targetFrame;
     const targetTime = targetFrame / state.fps;
     if (state.frameCache.has(targetFrame)) {
@@ -502,7 +587,8 @@
     }
 
     state.reverseSeekInFlight = true;
-    playback.currentTime = targetTime;
+    if (targetFrame === decodedFrame - 1) playback.step(-1);
+    else playback.currentTime = targetTime;
     updatePlaybackUI(targetTime, targetFrame);
     updateFrameContent(true);
   }
@@ -516,6 +602,7 @@
     stopReverse();
     state.timelineSeek.pendingFrame = null;
     state.timelineSeek.inFlight = false;
+    state.timelineSeek.resumeAfterSeek = null;
     state.isReverse = true;
     revealCleanControls();
     state.reverseAnchorFrame = startFrame;
@@ -529,11 +616,12 @@
   function seekFrame(frame, shouldPause = true, renderFrameContent = true) {
     if (!playback.duration) return;
     if (shouldPause) pause();
-    const targetFrame = clamp(frame, 0, lastFrame());
+    const targetFrame = clamp(Math.round(frame), 0, lastFrame());
+    const targetTime = frameSeekTime(targetFrame);
     const selectedAnnotation = state.annotations.find(a => a.id === state.selectedAnnotationId);
-    if (selectedAnnotation && selectedAnnotation.frame !== Math.round(targetFrame)) { state.selectedAnnotationId = null; state.selectedAnnotationFrame = null; }
-    showCachedFrame(targetFrame);
-    playback.currentTime = targetFrame / state.fps;
+    if (selectedAnnotation && selectedAnnotation.frame !== targetFrame) { state.selectedAnnotationId = null; state.selectedAnnotationFrame = null; }
+    if (!state.timelineSeek.displayGate) showPlaybackFrameOverlay();
+    playback.currentTime = targetTime;
     updatePlaybackUI(targetFrame / state.fps, targetFrame);
     if (renderFrameContent) updateFrameContent(true);
   }
@@ -547,11 +635,13 @@
   function keepPlayheadInView(ratio) {
     if (state.timelineScrub) return;
     const viewportWidth = els.timelineWrap.clientWidth;
-    const trackWidth = els.timelineTrack.getBoundingClientRect().width;
+    const trackWidth = viewportWidth * Math.max(1, state.timelineZoom);
     if (!viewportWidth || !trackWidth) return;
     if (trackWidth <= viewportWidth + 1) {
-      if (els.timelineWrap.scrollLeft) els.timelineWrap.scrollLeft = 0;
-      syncRulerToTimeline();
+      if (els.timelineWrap.scrollLeft) {
+        els.timelineWrap.scrollLeft = 0;
+        syncRulerToTimeline();
+      }
       return;
     }
 
@@ -570,8 +660,10 @@
     }
 
     targetScroll = clamp(targetScroll, 0, maxScroll);
-    if (Math.abs(targetScroll - currentScroll) > .5) els.timelineWrap.scrollLeft = targetScroll;
-    syncRulerToTimeline();
+    if (Math.abs(targetScroll - currentScroll) > .5) {
+      els.timelineWrap.scrollLeft = targetScroll;
+      syncRulerToTimeline();
+    }
   }
 
   function stopPlaybackUiLoop() {
@@ -601,13 +693,13 @@
 
   function updatePlaybackUI(time = playback.currentTime || 0, frame = Math.round(time * state.fps)) {
     const t = time, duration = playback.duration || 0;
-    const missing = playback.media?.missingFrames?.includes(sourceFrame(frame));
+    const missing = frameIsMissing(sourceFrame(frame));
     missingFrameNotice.hidden = !missing;
     missingFrameNotice.textContent = missing ? `缺失帧 ${sourceFrame(frame)}` : '';
     const ratio = duration ? clamp(t / duration, 0, 1) : 0;
-    els.currentTimecode.textContent = formatTimecode(t);
+    if (document.activeElement !== els.currentTimecode) els.currentTimecode.textContent = formatTimecode(t);
     els.durationTimecode.textContent = formatTimecode(duration);
-    els.frameReadout.textContent = `FRAME ${String(sourceFrame(frame)).padStart(5, '0')}`;
+    if (document.activeElement !== els.frameReadout) els.frameReadout.textContent = `FRAME ${String(sourceFrame(frame)).padStart(5, '0')}`;
     els.secondsReadout.textContent = `${t.toFixed(3)} SEC`;
     els.timelineProgress.style.width = `${ratio * 100}%`;
     els.playhead.style.left = `${ratio * 100}%`;
@@ -633,11 +725,14 @@
   }
 
   function updateActiveMarker(frame = currentFrame()) {
-    $$('.timeline-marker', els.markerLayer).forEach(marker => {
-      const b = state.bookmarks.find(item => item.id === marker.dataset.id);
-      marker.classList.toggle('active', !!b && b.frame === frame);
-    });
-    $$('.annotation-timeline-marker', els.annotationMarkerLayer).forEach(marker => marker.classList.toggle('active', Number(marker.dataset.frame) === frame));
+    if (state.activeMarkerFrame === frame) return;
+    const toggleFrame = (targetFrame, active) => {
+      for (const marker of state.bookmarkMarkersByFrame.get(targetFrame) || []) marker.classList.toggle('active', active);
+      for (const marker of state.annotationMarkersByFrame.get(targetFrame) || []) marker.classList.toggle('active', active);
+    };
+    if (state.activeMarkerFrame !== null) toggleFrame(state.activeMarkerFrame, false);
+    toggleFrame(frame, true);
+    state.activeMarkerFrame = frame;
   }
 
   function updateCacheStatus(hitFrame = null) {
@@ -649,7 +744,7 @@
 
   function clearFrameCache() {
     state.frameCacheGeneration += 1;
-    state.timelineSeek.displayGate = false; state.timelineSeek.displayFrame = null;
+    state.timelineSeek.displayGate = false; state.timelineSeek.displayFrame = null; state.timelineSeek.resumeAfterSeek = null;
     if (state.frameCacheHandle !== null && playback.cancelVideoFrameCallback) playback.cancelVideoFrameCallback(state.frameCacheHandle);
     state.frameCacheHandle = null;
     state.frameCachePending = false;
@@ -675,8 +770,8 @@
   }
 
   async function captureFrame(frame = currentFrame()) {
-
-    if (state.frameCachePending || state.frameCache.has(frame) || playback.readyState < 2 || !playback.videoWidth) return;
+    const cacheUseful = playback.paused || state.isReverse || !!state.timelineScrub || !!state.scrub?.dragging || state.quickGesture?.tool === 'select';
+    if (!cacheUseful || state.frameCachePending || state.frameCache.has(frame) || playback.readyState < 2 || !playback.videoWidth) return;
     state.frameCachePending = true;
     const generation = state.frameCacheGeneration;
     try {
@@ -688,7 +783,7 @@
       if (surface.width !== width || surface.height !== height) { surface.width = width; surface.height = height; }
       surface.getContext('2d', { alpha: false }).drawImage(playback.currentFrameCanvas, 0, 0, width, height);
       const bytesPerFrame = width * height * 4;
-      state.frameCacheMax = clamp(Math.floor(160 * 1024 * 1024 / bytesPerFrame), 36, 144);
+      state.frameCacheMax = clamp(Math.floor(64 * 1024 * 1024 / bytesPerFrame), 8, 64);
       let image;
       if (surface.transferToImageBitmap) image = surface.transferToImageBitmap();
       else if (window.createImageBitmap) image = await createImageBitmap(surface);
@@ -739,7 +834,9 @@
     if (playback.readyState < 2 || !playback.videoWidth || !playback.currentFrameCanvas) return false;
     const source = playback.currentFrameCanvas;
     const sourceWidth = source.width || playback.videoWidth, sourceHeight = source.height || playback.videoHeight;
-    const scale = Math.min(1, 960 / sourceWidth, 540 / sourceHeight);
+    const picture = els.mediaSurface.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const scale = Math.min(1, Math.max(2, picture.width) * dpr / sourceWidth, Math.max(2, picture.height) * dpr / sourceHeight);
     const width = Math.max(2, Math.round(sourceWidth * scale)), height = Math.max(2, Math.round(sourceHeight * scale));
     if (els.cacheCanvas.width !== width || els.cacheCanvas.height !== height) { els.cacheCanvas.width = width; els.cacheCanvas.height = height; }
     els.cacheCtx.drawImage(source, 0, 0, width, height);
@@ -756,12 +853,30 @@
     hideCachedFrame();
   }
 
+  function settleResponsiveSeek() {
+    const controller = state.timelineSeek;
+    if (controller.inFlight || controller.pendingFrame !== null || state.timelineScrub || state.scrub || state.quickGesture?.tool === 'select') return false;
+    const resume = controller.resumeAfterSeek;
+    controller.resumeAfterSeek = null;
+    updateUI(true);
+    updateMediaOutputTarget();
+    releaseResponsiveSeekDisplay();
+    if (resume === 'reverse') reverse();
+    else if (resume === 'play') play();
+    return true;
+  }
+
+  function finishResponsiveScrub(scrub) {
+    state.timelineSeek.resumeAfterSeek = scrub.wasReverse ? 'reverse' : (scrub.wasPlaying ? 'play' : null);
+    settleResponsiveSeek();
+  }
+
   function startFrameCacheLoop() {
     if (!playback.requestVideoFrameCallback) return;
     if (state.frameCacheHandle !== null) playback.cancelVideoFrameCallback?.(state.frameCacheHandle);
     const watchFrame = (_now, metadata) => {
       const windowInteracting = document.body.classList.contains('window-interacting');
-      if (!windowInteracting) captureFrame(Math.round(metadata.mediaTime * state.fps));
+      if (!windowInteracting && (playback.paused || state.isReverse || state.timelineScrub || state.scrub?.dragging || state.quickGesture?.tool === 'select')) captureFrame(Math.round(metadata.mediaTime * state.fps));
       if (!windowInteracting || state.colorPreset !== 'original') scheduleColorRender();
       state.frameCacheHandle = playback.requestVideoFrameCallback(watchFrame);
     };
@@ -1027,6 +1142,8 @@
     const hadTransitionFrame = state.mediaReplacing;
     state.mediaAwaitingFirstFrame = false;
     state.mediaReplacing = false;
+    document.body.classList.remove('media-loading');
+    els.viewerStage.removeAttribute('aria-busy');
     els.viewerStage.classList.add('has-video');
     setMediaReady(true);
     els.projectName.textContent = state.fileName;
@@ -1064,14 +1181,39 @@
     state.mediaAwaitingMetadata = false;
     state.mediaAwaitingFirstFrame = false;
     state.mediaReplacing = false;
+    document.body.classList.remove('media-loading');
+    els.viewerStage.removeAttribute('aria-busy');
     clearMediaPresentationAnimation();
     clearMediaTransitionFrame();
     els.viewerStage.classList.remove('has-video');
     setMediaReady(false);
   }
 
-  function loadMediaSource(media, ownedObjectUrl = null) {
+  function cancelMediaLoad() {
+    if (!state.mediaProbing && !state.mediaAwaitingMetadata && !state.mediaAwaitingFirstFrame) return;
+    state.mediaProbeGeneration += 1;
+    if (state.activeMediaProbeId) state.cancelledMediaProbeIds.add(state.activeMediaProbeId);
+    state.activeMediaProbeId = null; state.mediaProbing = false;
+    state.mediaLoadGeneration += 1;
+    state.mediaAwaitingMetadata = false; state.mediaAwaitingFirstFrame = false; state.mediaReplacing = false;
+    playback.stop?.();
+    clearMediaPresentationAnimation(); clearMediaTransitionFrame();
+    document.body.classList.remove('media-loading'); els.viewerStage.removeAttribute('aria-busy');
+    els.viewerStage.classList.remove('has-video'); setMediaReady(false); setStatus('已取消打开媒体');
+  }
+
+  function beginMediaProbeRequest() {
+    if (state.activeMediaProbeId) state.cancelledMediaProbeIds.add(state.activeMediaProbeId);
+    state.activeMediaProbeId = null;
+    return ++state.mediaProbeGeneration;
+  }
+
+  async function loadMediaSource(media, ownedObjectUrl = null) {
     if (!media?.url || !media?.name) { toast('请选择有效的视频文件'); return; }
+    setStatus(`正在打开 · ${media.name}`);
+    $('.media-loading-indicator span').textContent = media.mediaKind === 'sequence' ? '正在扫描图片序列…' : '正在读取媒体…';
+    document.body.classList.add('media-loading');
+    els.viewerStage.setAttribute('aria-busy', 'true');
     persistCurrentWorkspaceNow();
     pause();
     hideAnnotationRadialMenu();
@@ -1099,14 +1241,29 @@
     state.sourcePath = media.path || null;
     state.fileName = media.name;
     state.fileMeta = { name: media.name, size: media.size || 0, type: media.type || 'video/*', modified: media.lastModified || 0, path: media.path || null, mediaId: media.mediaId, mediaKind: media.mediaKind || 'video', sourceFps: media.sourceFps || null, sourceFrameOffset: media.sourceFrameOffset || 0, sequence: media.sequence || null };
-    activateMediaWorkspace(state.fileMeta);
+    const generation = state.mediaLoadGeneration;
+    const activated = await activateMediaWorkspace(state.fileMeta, generation).catch(() => generation === state.mediaLoadGeneration);
+    if (!activated || generation !== state.mediaLoadGeneration) return;
     playback.setProjectFps(state.fps);
     playback.open(media);
 
   }
 
   async function openVideo(file) {
-    if (desktopAPI) { openDesktopVideo(await desktopAPI.describeDroppedFile(file)); return; }
+    if (desktopAPI) {
+      const probe = beginMediaProbeRequest(); state.mediaProbing = true;
+      setStatus(`正在检查 · ${file?.name || '媒体'}`); $('.media-loading-indicator span').textContent = '正在检查媒体或扫描序列…';
+      document.body.classList.add('media-loading'); els.viewerStage.setAttribute('aria-busy', 'true');
+      try {
+        const media = await desktopAPI.describeDroppedFile(file);
+        if (probe !== state.mediaProbeGeneration) return;
+        state.mediaProbing = false; openDesktopVideo(media); return;
+      } catch {
+        if (probe !== state.mediaProbeGeneration) return;
+        state.mediaProbing = false; document.body.classList.remove('media-loading'); els.viewerStage.removeAttribute('aria-busy');
+        setStatus('媒体检查失败'); toast('无法读取这个媒体文件'); return;
+      }
+    }
     const extension = file?.name?.split('.').pop()?.toLowerCase();
     const looksLikeVideo = file && (file.type?.startsWith('video/') || AstriaFormats.browser.includes(extension));
     if (!looksLikeVideo) { toast('请选择有效的视频文件'); return; }
@@ -1115,10 +1272,43 @@
   }
 
   function openDesktopVideo(media) {
-    if (!media) return;
-    if (media.error) { announceInitialMediaPresented(true); toast(media.error === 'missing' ? '视频文件已移动或删除' : '无法打开视频'); refreshRecentVideos(); return; }
-    loadMediaSource(media);
+    if (!media) return false;
+    const requestId = media._openRequestId || null;
+    if (requestId && (state.cancelledMediaProbeIds.delete(requestId) || (state.activeMediaProbeId && state.activeMediaProbeId !== requestId))) return false;
+    if (requestId && state.activeMediaProbeId === requestId) state.activeMediaProbeId = null;
+    state.mediaProbing = false;
+    if (media.error) {
+      document.body.classList.remove('media-loading'); els.viewerStage.removeAttribute('aria-busy');
+      announceInitialMediaPresented(true); toast(media.error === 'missing' ? '视频文件已移动或删除' : '无法打开视频'); refreshRecentVideos(); return false;
+    }
+    const playableMedia = requestId ? { ...media } : media;
+    if (requestId) delete playableMedia._openRequestId;
+    void loadMediaSource(playableMedia).catch(() => {
+      failMediaLoad(); announceInitialMediaPresented(true); setStatus('视频载入失败'); toast('无法打开视频');
+    });
     refreshRecentVideos();
+    return true;
+  }
+
+  function applyRememberedPlaybackPosition() {
+    const position = Number(state.pendingResumePosition);
+    state.pendingResumePosition = null;
+    if (!state.rememberPlaybackPosition || !Number.isFinite(position) || position <= 0 || !playback.duration) return;
+    const target = clamp(position, 0, Math.max(0, playback.duration - frameDuration()));
+    if (target <= frameDuration() * .5) return;
+    state.resumeSeekPending = true;
+    state.resumeTargetPosition = target;
+    playback.currentTime = target;
+    updatePlaybackUI(target, Math.round(target * state.fps));
+  }
+
+  function acceptResumeFrame(event) {
+    if (!state.resumeSeekPending) return true;
+    const presentedTime = Number(event?.detail?.time ?? event?.detail?.mediaTime ?? playback.currentTime);
+    if (!Number.isFinite(presentedTime) || Math.abs(presentedTime - state.resumeTargetPosition) > Math.max(.05, frameDuration() * 1.5)) return false;
+    state.resumeSeekPending = false;
+    state.resumeTargetPosition = null;
+    return true;
   }
 
   function onMetadata(event) {
@@ -1131,6 +1321,7 @@
       playback.setProjectFps(state.fps);
     }
     playback.playbackRate = state.playbackSpeed;
+    applyRememberedPlaybackPosition();
     if (!state.mediaAwaitingFirstFrame) {
       syncLoadedMediaMetadataUI();
       scheduleLayoutRefresh();
@@ -1159,6 +1350,13 @@
     state.viewerPan.y = clamp(state.viewerPan.y, -maxY, maxY);
   }
 
+  function applyViewerPanTransform() {
+    const transform = `translate3d(${state.viewerPan.x}px,${state.viewerPan.y}px,0)`;
+    els.mediaSurface.style.transform = transform;
+    ambient.canvas.style.transform = transform;
+    topbarAmbientCanvas.style.transform = transform;
+  }
+
   function resizeCanvas(lightweight = false) {
     if (!playback.videoWidth) return;
     const stage = els.viewerStage.getBoundingClientRect();
@@ -1167,9 +1365,10 @@
     const width = Math.max(1, playback.videoWidth * scale);
     const height = Math.max(1, playback.videoHeight * scale);
     clampViewerPan(width, height, stage);
+    state.viewerLayout = { width, height, stageWidth: stage.width, stageHeight: stage.height };
     els.mediaSurface.style.width = `${width}px`;
     els.mediaSurface.style.height = `${height}px`;
-    els.mediaSurface.style.transform = `translate3d(${state.viewerPan.x}px,${state.viewerPan.y}px,0)`;
+    applyViewerPanTransform();
     updateViewerZoomUI(scale);
     if (lightweight) return;
     // Keep the falloff outside the picture, including wide pillarbox/letterbox areas.
@@ -1196,9 +1395,8 @@
   function updateMediaOutputTarget(mode = null) {
     if (!playback.videoWidth || !playback.videoHeight || typeof playback.setOutputTarget !== 'function') return;
     const sourceRequired = state.pixelInspector ||
-      (state.viewerZoomMode === 'custom' && Math.abs(state.viewerZoom - 1) < .001) ||
-      (playback.paused && !state.isReverse);
-    const activeMode = mode || ((state.timelineScrub || state.scrub?.dragging) ? 'scrub' : (sourceRequired ? 'source' : 'viewport'));
+      (state.viewerZoomMode === 'custom' && Math.abs(state.viewerZoom - 1) < .001);
+    const activeMode = mode || (sourceRequired ? 'source' : 'viewport');
     const picture = els.mediaSurface.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     const width = activeMode === 'source' ? playback.videoWidth : Math.min(playback.videoWidth, Math.round(Math.max(2, picture.width) * dpr));
@@ -1318,17 +1516,18 @@
     });
     list.sort((a,b) => sort === 'title' ? a.title.localeCompare(b.title) : sort === 'rating' ? b.rating - a.rating : sort === 'created' ? a.createdTime.localeCompare(b.createdTime) : a.frame - b.frame);
     els.bookmarkList.classList.toggle('grid', state.view === 'grid');
-    els.bookmarkList.innerHTML = '';
+    els.bookmarkList.replaceChildren();
     if (!list.length) {
       els.bookmarkList.appendChild(els.bookmarkEmpty);
       els.bookmarkEmpty.style.display = 'flex';
     } else {
+      const fragment = document.createDocumentFragment();
       list.forEach(b => {
         const card = document.createElement('article');
         card.className = `bookmark-card${state.selectedBookmarkIds.includes(b.id) ? ' selected' : ''}`;
         card.dataset.id = b.id; card.style.setProperty('--bookmark-color', b.color);
         card.innerHTML = `
-          ${b.thumbnail ? `<img class="bookmark-thumb" src="${b.thumbnail}" alt="Frame ${sourceFrame(b.frame)}">` : '<div class="bookmark-thumb"></div>'}
+          ${b.thumbnail ? `<img class="bookmark-thumb" src="${b.thumbnail}" alt="Frame ${sourceFrame(b.frame)}" loading="lazy" decoding="async">` : '<div class="bookmark-thumb"></div>'}
           <div class="bookmark-meta">
             <div class="bookmark-title" title="双击重命名">${escapeHtml(b.title)}</div>
             <div class="bookmark-data"><b>F ${String(sourceFrame(b.frame)).padStart(5,'0')}</b><span>${formatTimecode(b.timestamp)}</span></div>
@@ -1344,10 +1543,20 @@
         card.addEventListener('contextmenu', e => { e.preventDefault(); showBookmarkMenu(e.clientX, e.clientY, b.id); });
         $('.rating', card).title = '点击循环设置 0–5 星评分';
         $('.rating', card).addEventListener('click', e => { e.stopPropagation(); b.rating = (b.rating + 1) % 6; b.updatedTime = new Date().toISOString(); renderBookmarks(); saveWorkspace(); });
-        els.bookmarkList.appendChild(card);
+        fragment.appendChild(card);
       });
+      els.bookmarkList.appendChild(fragment);
     }
     updateCounts();
+  }
+
+  function updateBookmarkCardPosition(bookmark) {
+    const card = $(`.bookmark-card[data-id="${bookmark.id}"]`, els.bookmarkList);
+    if (!card) return;
+    const frame = $('.bookmark-data b', card);
+    const time = $('.bookmark-data span', card);
+    if (frame) frame.textContent = `F ${String(sourceFrame(bookmark.frame)).padStart(5, '0')}`;
+    if (time) time.textContent = formatTimecode(bookmark.timestamp);
   }
 
   function renderTimeline() {
@@ -1357,34 +1566,56 @@
     els.ruler.style.width = `${width}%`;
     els.markerLayer.innerHTML = '';
     els.annotationMarkerLayer.innerHTML = '';
+    state.activeMarkerFrame = null;
+    state.bookmarkMarkersByFrame.clear();
+    state.annotationMarkersByFrame.clear();
     const timelineLastFrame = Math.max(1, lastFrame());
     state.bookmarks.forEach(b => {
       const marker = document.createElement('div');
       marker.className = `timeline-marker${state.selectedBookmarkIds.includes(b.id) ? ' active' : ''}`;
       marker.dataset.id = b.id; marker.style.left = `${clamp(b.frame / timelineLastFrame * 100, 0, 100)}%`;
+      if (!state.bookmarkMarkersByFrame.has(b.frame)) state.bookmarkMarkersByFrame.set(b.frame, []);
+      state.bookmarkMarkersByFrame.get(b.frame).push(marker);
       marker.style.setProperty('--marker-color', b.color); marker.title = `${b.title} · Frame ${sourceFrame(b.frame)}`;
       marker.addEventListener('click', e => { e.stopPropagation(); selectBookmark(b.id, e.ctrlKey || e.metaKey); });
-      let moving = false;
-      marker.addEventListener('pointerdown', e => { moving = true; marker.setPointerCapture(e.pointerId); pause(); e.stopPropagation(); });
+      let moving = false, moved = false, movingPointerId = null;
+      marker.addEventListener('pointerdown', e => { moving = true; moved = false; movingPointerId = e.pointerId; marker.setPointerCapture(e.pointerId); pause(); e.stopPropagation(); });
       marker.addEventListener('pointermove', e => {
         if (!moving) return;
         const rect = els.timelineTrack.getBoundingClientRect();
+        const previousFrame = b.frame;
         b.frame = Math.round(clamp((e.clientX - rect.left) / rect.width, 0, 1) * lastFrame());
+        if (b.frame === previousFrame) return;
+        moved = true;
         b.timestamp = b.frame / state.fps;
-        marker.style.left = `${b.frame / timelineLastFrame * 100}%`; seekFrame(b.frame); renderBookmarks();
+        const previousMarkers = state.bookmarkMarkersByFrame.get(previousFrame) || [];
+        state.bookmarkMarkersByFrame.set(previousFrame, previousMarkers.filter(item => item !== marker));
+        if (!state.bookmarkMarkersByFrame.get(previousFrame)?.length) state.bookmarkMarkersByFrame.delete(previousFrame);
+        if (!state.bookmarkMarkersByFrame.has(b.frame)) state.bookmarkMarkersByFrame.set(b.frame, []);
+        state.bookmarkMarkersByFrame.get(b.frame).push(marker);
+        marker.style.left = `${b.frame / timelineLastFrame * 100}%`;
+        updateBookmarkCardPosition(b);
+        queueResponsiveSeek(b.frame);
       });
-      marker.addEventListener('pointerup', () => { moving = false; saveWorkspace(); });
+      const finishMove = () => {
+        if (!moving) return;
+        moving = false;
+        if (movingPointerId !== null && marker.hasPointerCapture?.(movingPointerId)) marker.releasePointerCapture(movingPointerId);
+        movingPointerId = null;
+        if (!moved) return;
+        renderBookmarks(); releaseResponsiveSeekDisplay(); saveWorkspace();
+      };
+      marker.addEventListener('pointerup', finishMove);
+      marker.addEventListener('pointercancel', finishMove);
+      marker.addEventListener('lostpointercapture', finishMove);
       els.markerLayer.appendChild(marker);
     });
-    const annotationsByFrame = new Map();
-    state.annotations.forEach(annotation => {
-      if (!annotationsByFrame.has(annotation.frame)) annotationsByFrame.set(annotation.frame, []);
-      annotationsByFrame.get(annotation.frame).push(annotation);
-    });
-    annotationsByFrame.forEach((annotations, frame) => {
+    annotationsByFrame().forEach((annotations, frame) => {
       const marker = document.createElement('div');
       marker.className = 'annotation-timeline-marker';
       marker.dataset.frame = frame;
+      if (!state.annotationMarkersByFrame.has(frame)) state.annotationMarkersByFrame.set(frame, []);
+      state.annotationMarkersByFrame.get(frame).push(marker);
       marker.style.left = `${clamp(frame / timelineLastFrame * 100, 0, 100)}%`;
       marker.style.setProperty('--annotation-marker-color', annotations[0].color || state.annotationColor);
       marker.title = `Frame ${sourceFrame(frame)} 有批注 · ${annotations.length} 个内容`;
@@ -1546,7 +1777,7 @@
 
   function eraseAnnotationsAt(clientX, clientY) {
     const gesture = state.quickGesture;
-    const hits = state.annotations.filter(annotation => annotationHitAt(annotation, clientX, clientY));
+    const hits = annotationsAt(currentFrame()).filter(annotation => annotationHitAt(annotation, clientX, clientY));
     if (!hits.length) return;
     if (!gesture.historyPushed) { pushAnnotationUndo(); gesture.historyPushed = true; }
     const ids = new Set(hits.map(annotation => annotation.id));
@@ -1591,7 +1822,11 @@
     } else if (gesture.tool === 'eraser') eraseAnnotationsAt(e.clientX, e.clientY);
     else {
       const p = canvasPoint(e); gesture.annotation.end = p;
-      if (gesture.annotation.type === 'brush') gesture.annotation.points.push(p);
+      if (gesture.annotation.type === 'brush') {
+        const previous = gesture.annotation.points.at(-1);
+        const rect = els.canvas.getBoundingClientRect();
+        if (!previous || Math.hypot((p.x - previous.x) * rect.width, (p.y - previous.y) * rect.height) >= 1.5) gesture.annotation.points.push(p);
+      }
       drawAnnotations(gesture.annotation);
     }
   }
@@ -1620,8 +1855,10 @@
   }
 
   function pushAnnotationUndo() {
-    const snapshot = typeof structuredClone === 'function' ? structuredClone(state.annotations) : JSON.parse(JSON.stringify(state.annotations));
-    state.annotationUndo.push(snapshot);
+    const frame = currentFrame();
+    const current = annotationsAt(frame);
+    const annotations = typeof structuredClone === 'function' ? structuredClone(current) : JSON.parse(JSON.stringify(current));
+    state.annotationUndo.push({ frame, annotations });
     if (state.annotationUndo.length > 50) state.annotationUndo.shift();
   }
 
@@ -1684,7 +1921,7 @@
   function undoAnnotation() {
     const previous = state.annotationUndo.pop();
     if (!previous) { toast('没有可撤销的批注操作'); return; }
-    state.annotations = previous;
+    state.annotations = state.annotations.filter(annotation => annotation.frame !== previous.frame).concat(previous.annotations);
     state.selectedAnnotationId = null; state.selectedAnnotationFrame = null;
     refreshAnnotationUI(); toast('已撤销批注操作');
   }
@@ -1693,7 +1930,7 @@
     const rect = els.canvas.getBoundingClientRect();
     const ctx = els.ctx; ctx.clearRect(0, 0, rect.width, rect.height);
     if (!state.annotationVisible) return;
-    const list = state.annotations.filter(a => a.frame === currentFrame() && !a.hidden);
+    const list = annotationsAt(currentFrame()).filter(a => !a.hidden);
     if (preview) list.push(preview);
     list.forEach(a => drawShape(ctx, a, rect.width, rect.height));
   }
@@ -1720,7 +1957,7 @@
   }
 
   function updateAnnotationThumbnail(frame) {
-    const annotations = state.annotations.filter(annotation => annotation.frame === frame && !annotation.hidden);
+    const annotations = annotationsAt(frame).filter(annotation => !annotation.hidden);
     if (!annotations.length) { delete state.annotationThumbnails[frame]; return; }
     if (!playback.videoWidth || Math.abs(currentFrame() - frame) > 1 || playback.readyState < 2) return;
     const canvas = document.createElement('canvas');
@@ -1737,15 +1974,11 @@
   function annotationName(type) { return ({arrow:'箭头',circle:'圆形',rectangle:'矩形',brush:'画笔',text:'文字',highlight:'高亮'})[type] || type; }
 
   function renderAnnotationList() {
-    const byFrame = new Map();
-    state.annotations.forEach(annotation => {
-      if (!byFrame.has(annotation.frame)) byFrame.set(annotation.frame, []);
-      byFrame.get(annotation.frame).push(annotation);
-    });
-    const list = [...byFrame.entries()]
+    const list = [...annotationsByFrame().entries()]
       .filter(([frame]) => state.annotationScope === 'all' || frame === currentFrame())
       .sort((a, b) => a[0] - b[0]);
-    els.annotationList.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+    els.annotationList.replaceChildren();
     els.annotationEmpty.style.display = list.length ? 'none' : 'flex';
     $('b', els.annotationEmpty).textContent = state.annotationScope === 'all' ? '此视频还没有批注' : '此帧没有批注';
     $('p', els.annotationEmpty).textContent = '在画面上右键打开批注工具环';
@@ -1754,14 +1987,15 @@
       const allHidden = annotations.every(annotation => annotation.hidden);
       row.className = `annotation-row${state.selectedAnnotationFrame === frame ? ' selected' : ''}`;
       const thumbnail = state.annotationThumbnails[frame];
-      row.innerHTML = `${thumbnail ? `<img class="annotation-thumb" src="${thumbnail}" alt="Frame ${sourceFrame(frame)} 批注缩略图">` : '<div class="annotation-thumb"></div>'}<span class="annotation-info"><b>Frame ${String(sourceFrame(frame)).padStart(5,'0')} 批注</b><small>${annotations.length} 个内容 · ${formatTimecode(frame/state.fps)}</small></span><button class="jump-annotation-btn" title="跳转到此帧" aria-label="跳转到此帧">${reviewIcon('jump')}</button><button class="visibility-btn" title="显示/隐藏此帧全部批注" aria-label="${allHidden ? '显示' : '隐藏'}此帧全部批注">${reviewIcon(allHidden ? 'eye-off' : 'eye')}</button><button class="delete-btn" title="删除此帧全部批注" aria-label="删除此帧全部批注">${reviewIcon('trash')}</button>`;
+      row.innerHTML = `${thumbnail ? `<img class="annotation-thumb" src="${thumbnail}" alt="Frame ${sourceFrame(frame)} 批注缩略图" loading="lazy" decoding="async">` : '<div class="annotation-thumb"></div>'}<span class="annotation-info"><b>Frame ${String(sourceFrame(frame)).padStart(5,'0')} 批注</b><small>${annotations.length} 个内容 · ${formatTimecode(frame/state.fps)}</small></span><button class="jump-annotation-btn" title="跳转到此帧" aria-label="跳转到此帧">${reviewIcon('jump')}</button><button class="visibility-btn" title="显示/隐藏此帧全部批注" aria-label="${allHidden ? '显示' : '隐藏'}此帧全部批注">${reviewIcon(allHidden ? 'eye-off' : 'eye')}</button><button class="delete-btn" title="删除此帧全部批注" aria-label="删除此帧全部批注">${reviewIcon('trash')}</button>`;
       const jump = () => { state.selectedAnnotationId = annotations[0].id; state.selectedAnnotationFrame = frame; seekFrame(frame); renderAnnotationList(); };
       row.addEventListener('click', jump);
       $('.jump-annotation-btn',row).addEventListener('click', e => { e.stopPropagation(); jump(); });
       $('.visibility-btn',row).addEventListener('click', e => { e.stopPropagation(); annotations.forEach(annotation => annotation.hidden = !allHidden); renderAnnotationList(); drawAnnotations(); saveWorkspace(); });
       $('.delete-btn',row).addEventListener('click', e => { e.stopPropagation(); state.annotations=state.annotations.filter(annotation=>annotation.frame!==frame); delete state.annotationThumbnails[frame]; if(state.selectedAnnotationFrame===frame){state.selectedAnnotationId=null;state.selectedAnnotationFrame=null;} renderAnnotationList(); renderTimeline(); drawAnnotations(); updateCounts(); saveWorkspace(); });
-      els.annotationList.appendChild(row);
+      fragment.appendChild(row);
     });
+    els.annotationList.appendChild(fragment);
   }
 
   function updateCounts() {
@@ -1773,7 +2007,7 @@
   }
 
   function workspaceData() {
-    return { version: '0.8', mediaKind: state.fileMeta?.mediaKind || 'video', sourceFrameOffset: state.fileMeta?.sourceFrameOffset || 0, sequence: state.fileMeta?.sequence || null, fileMeta: state.fileMeta, fps: state.fps, fpsMode: state.fpsMode, fpsModeExplicit: state.fpsModeExplicit, bookmarks: state.bookmarks, annotations: state.annotations, annotationThumbnails: state.annotationThumbnails, timelineZoom: state.timelineZoom, loopInFrame: state.loopInFrame, loopOutFrame: state.loopOutFrame, colorPreset: state.colorPreset, updatedAt: new Date().toISOString() };
+    return { version: '0.8', mediaKind: state.fileMeta?.mediaKind || 'video', sourceFrameOffset: state.fileMeta?.sourceFrameOffset || 0, sequence: state.fileMeta?.sequence || null, fileMeta: state.fileMeta, fps: state.fps, fpsMode: state.fpsMode, fpsModeExplicit: state.fpsModeExplicit, bookmarks: state.bookmarks, annotations: state.annotations, annotationThumbnails: state.annotationThumbnails, timelineZoom: state.timelineZoom, loopInFrame: state.loopInFrame, loopOutFrame: state.loopOutFrame, colorPreset: state.colorPreset, playbackPosition: state.rememberPlaybackPosition ? rememberedPlaybackPosition() : null, updatedAt: new Date().toISOString() };
   }
 
   function legacyMediaKey(meta) {
@@ -1790,63 +2024,134 @@
   }
 
   function readWorkspaceLibrary() {
-    if (desktopData?.workspaces && typeof desktopData.workspaces === 'object') return desktopData.workspaces;
+    if (desktopAPI) return desktopData?.workspaces || {};
     try { return JSON.parse(localStorage.getItem(WORKSPACES_KEY)) || {}; }
     catch { return {}; }
   }
 
   function preferenceData() {
-    return { ambientEnabled: ambient.enabled, autosave: state.autosave, viewerScrubSensitivity: state.viewerScrubSensitivity, lumaMode: state.lumaMode, lumaContrast: state.lumaContrast, volume: state.volume, muted: state.muted, annotationSize: state.annotationSize, annotationColor: state.annotationColor, quickAnnotationTool: state.quickAnnotationTool, endBehavior: state.endBehavior, playbackSpeed: state.playbackSpeed, autoplayOnOpen: state.autoplayOnOpen, startupMode: state.startupMode, timelineHoverPreview: state.timelineHoverPreview, timelineHoverPreviewSize: state.timelineHoverPreviewSize, guidesMaster: state.guidesMaster, guideThirds: state.guideThirds, guideGolden: state.guideGolden, guideSpiral: state.guideSpiral, guideSpiralRotation: state.guideSpiralRotation, guideCenter: state.guideCenter, guideDiagonal: state.guideDiagonal, guideTriangle: state.guideTriangle, guideSymmetry: state.guideSymmetry, guideActionSafe: state.guideActionSafe, guideTitleSafe: state.guideTitleSafe, guideAspect: state.guideAspect, guideOpacity: state.guideOpacity, guideMaskStrength: state.guideMaskStrength, shortcuts: state.shortcuts };
+    return { ambientEnabled: ambient.enabled, autosave: state.autosave, viewerScrubSensitivity: state.viewerScrubSensitivity, lumaMode: state.lumaMode, lumaContrast: state.lumaContrast, volume: state.volume, muted: state.muted, annotationSize: state.annotationSize, annotationColor: state.annotationColor, quickAnnotationTool: state.quickAnnotationTool, endBehavior: state.endBehavior, playbackSpeed: state.playbackSpeed, autoplayOnOpen: state.autoplayOnOpen, rememberPlaybackPosition: state.rememberPlaybackPosition, startupMode: state.startupMode, timelineHoverPreview: state.timelineHoverPreview, timelineHoverPreviewSize: state.timelineHoverPreviewSize, guidesMaster: state.guidesMaster, guideThirds: state.guideThirds, guideGolden: state.guideGolden, guideSpiral: state.guideSpiral, guideSpiralRotation: state.guideSpiralRotation, guideCenter: state.guideCenter, guideDiagonal: state.guideDiagonal, guideTriangle: state.guideTriangle, guideSymmetry: state.guideSymmetry, guideActionSafe: state.guideActionSafe, guideTitleSafe: state.guideTitleSafe, guideAspect: state.guideAspect, guideOpacity: state.guideOpacity, guideMaskStrength: state.guideMaskStrength, shortcuts: state.shortcuts };
   }
 
   function persistPreferences() {
     const preferences = preferenceData();
-    localStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences));
-    syncDesktopAppData(readWorkspaceLibrary(), preferences);
+    if (desktopAPI) {
+      desktopData = { ...(desktopData || {}), preferences, workspaces: desktopData?.workspaces || {} };
+      if (desktopAPI.savePreferences) desktopAPI.savePreferences(preferences);
+      else desktopAPI.saveAppData({ preferences });
+    } else localStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences));
   }
 
-  function syncDesktopAppData(workspaces = readWorkspaceLibrary(), preferences = preferenceData()) {
-    if (!desktopAPI) return;
-    desktopData = { ...(desktopData || {}), preferences, workspaces };
-    desktopAPI.saveAppData({ preferences, workspaces });
+  function rememberedPlaybackPosition() {
+    const position = Number(playback.currentTime);
+    if (!Number.isFinite(position) || position < 0) return 0;
+    const duration = Number(playback.duration) || 0;
+    if (duration > 0 && position >= duration - Math.max(1, frameDuration() * 2)) return 0;
+    return Math.round(clamp(position, 0, duration || position) * 1000) / 1000;
+  }
+
+  function playbackProgressSnapshot(position) {
+    const saved = readWorkspaceLibrary()[state.currentMediaKey] || {};
+    return {
+      ...saved,
+      version: saved.version || '0.8',
+      mediaKind: saved.mediaKind || state.fileMeta?.mediaKind || 'video',
+      sourceFrameOffset: saved.sourceFrameOffset ?? state.fileMeta?.sourceFrameOffset ?? 0,
+      sequence: saved.sequence ?? state.fileMeta?.sequence ?? null,
+      fileMeta: saved.fileMeta || state.fileMeta,
+      fps: saved.fps || state.fps,
+      fpsMode: saved.fpsMode || state.fpsMode,
+      fpsModeExplicit: saved.fpsModeExplicit ?? state.fpsModeExplicit,
+      playbackPosition: position,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  function persistPlaybackPositionNow() {
+    clearTimeout(state.playbackPositionSaveTimer);
+    state.playbackPositionSaveTimer = null;
+    if (!state.rememberPlaybackPosition || !state.currentMediaKey || !state.fileMeta) return;
+    const position = rememberedPlaybackPosition();
+    if (Number.isFinite(state.lastSavedPlaybackPosition) && Math.abs(position - state.lastSavedPlaybackPosition) < .25) return;
+    state.lastSavedPlaybackPosition = position;
+    void persistMediaSnapshot(state.currentMediaKey, playbackProgressSnapshot(position))?.catch?.(() => {});
+  }
+
+  function schedulePlaybackPositionSave() {
+    if (!state.rememberPlaybackPosition || !state.currentMediaKey || state.playbackPositionSaveTimer) return;
+    state.playbackPositionSaveTimer = setTimeout(persistPlaybackPositionNow, 5000);
   }
 
   function persistMediaSnapshot(key, snapshot) {
     if (!key) return;
+    if (desktopAPI?.saveMediaWorkspace) {
+      desktopData ||= { preferences: preferenceData(), workspaces: {} };
+      desktopData.workspaces ||= {};
+      desktopData.workspaces[key] = snapshot;
+      return desktopAPI.saveMediaWorkspace(key, snapshot).then(saved => {
+        if (!saved) throw new Error('媒体工作区保存失败');
+        return true;
+      });
+    }
     const library = readWorkspaceLibrary();
     library[key] = snapshot;
     localStorage.setItem(WORKSPACES_KEY, JSON.stringify(library));
-    syncDesktopAppData(library);
+    return Promise.resolve(true);
   }
 
   function removeMediaSnapshot(key) {
     if (!key) return;
+    clearTimeout(state.saveTimer);
+    state.saveTimer = null;
+    if (desktopAPI?.deleteMediaWorkspace) {
+      if (desktopData?.workspaces) delete desktopData.workspaces[key];
+      void desktopAPI.deleteMediaWorkspace(key);
+      return;
+    }
     const library = readWorkspaceLibrary();
     delete library[key];
     localStorage.setItem(WORKSPACES_KEY, JSON.stringify(library));
-    syncDesktopAppData(library);
   }
 
   function persistCurrentWorkspaceNow() {
     try {
+      clearTimeout(state.playbackPositionSaveTimer);
+      state.playbackPositionSaveTimer = null;
       persistPreferences();
-      if (state.currentMediaKey) persistMediaSnapshot(state.currentMediaKey, workspaceData());
+      if (state.autosave && state.currentMediaKey) {
+        state.lastSavedPlaybackPosition = rememberedPlaybackPosition();
+        void persistMediaSnapshot(state.currentMediaKey, workspaceData())?.catch?.(() => { els.notesSaved.textContent = '保存失败'; });
+      } else persistPlaybackPositionNow();
     } catch { toast('本地存储空间不足，请导出工作区'); }
   }
 
-  function activateMediaWorkspace(meta) {
+  async function activateMediaWorkspace(meta, generation = state.mediaLoadGeneration) {
     state.currentMediaKey = mediaKey(meta);
+    const key = state.currentMediaKey;
     const library = readWorkspaceLibrary();
-    let saved = library[state.currentMediaKey];
+    let saved = null;
+    try { saved = desktopAPI?.loadMediaWorkspace ? await desktopAPI.loadMediaWorkspace(key) : library[key]; }
+    catch { toast('工作区读取失败，将使用空白工作区'); }
+    if (generation !== state.mediaLoadGeneration || key !== state.currentMediaKey) return false;
     if (!saved && meta?.mediaId && meta.mediaKind !== 'sequence') {
       const legacyKey = legacyMediaKey(meta);
-      const legacy = library[legacyKey];
+      let legacy = null;
+      try { legacy = desktopAPI?.loadMediaWorkspace ? await desktopAPI.loadMediaWorkspace(legacyKey) : library[legacyKey]; }
+      catch { /* current media can still open without a legacy workspace */ }
+      if (generation !== state.mediaLoadGeneration || key !== state.currentMediaKey) return false;
       if (legacy && sameMediaPath(legacy.fileMeta?.path, meta.path)) {
         saved = { ...legacy, fileMeta: { ...(legacy.fileMeta || {}), ...meta } };
-        library[state.currentMediaKey] = saved;
-        localStorage.setItem(WORKSPACES_KEY, JSON.stringify(library));
-        syncDesktopAppData(library);
+        const migrated = await persistMediaSnapshot(key, saved).catch(() => false);
+        if (generation !== state.mediaLoadGeneration || key !== state.currentMediaKey) return false;
+        if (migrated && desktopAPI?.deleteMediaWorkspace) void desktopAPI.deleteMediaWorkspace(legacyKey);
+        else if (migrated) {
+          library[key] = saved; delete library[legacyKey];
+          localStorage.setItem(WORKSPACES_KEY, JSON.stringify(library));
+        }
       }
+    }
+    if (desktopAPI) {
+      desktopData.workspaces = { [key]: saved || null };
     }
     const explicitCustomFps = meta?.mediaKind !== 'video' || (saved?.fpsMode === 'custom' && saved?.fpsModeExplicit === true);
     state.fpsMode = explicitCustomFps ? 'custom' : 'source';
@@ -1858,6 +2163,10 @@
     state.timelineZoom = Number(saved?.timelineZoom) || 1;
     state.loopInFrame = Number.isFinite(saved?.loopInFrame) ? saved.loopInFrame : null;
     state.loopOutFrame = Number.isFinite(saved?.loopOutFrame) ? saved.loopOutFrame : null;
+    state.pendingResumePosition = state.rememberPlaybackPosition && Number.isFinite(Number(saved?.playbackPosition)) ? Math.max(0, Number(saved.playbackPosition)) : null;
+    state.resumeSeekPending = false;
+    state.resumeTargetPosition = null;
+    state.lastSavedPlaybackPosition = state.pendingResumePosition;
     state.colorPreset = COLOR_PRESETS[saved?.colorPreset] ? saved.colorPreset : 'original';
     els.colorCanvas.classList.toggle('active', state.colorPreset !== 'original');
     state.selectedBookmarkIds = [];
@@ -1875,24 +2184,36 @@
     renderAnnotationList();
     syncNotes();
     updateCounts();
+    return true;
   }
 
   function saveWorkspace(manual = false) {
-    if (!state.autosave && !manual) return;
+    if (!state.autosave && !manual) {
+      if (state.currentMediaKey) els.notesSaved.textContent = '未保存 · Ctrl+S';
+      return;
+    }
     clearTimeout(state.saveTimer);
     const key = state.currentMediaKey;
     const snapshot = key ? workspaceData() : null;
     const preferences = preferenceData();
-    state.saveTimer = setTimeout(() => {
+    if (key) els.notesSaved.textContent = '保存中…';
+    state.saveTimer = setTimeout(async () => {
       try {
-        localStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences));
-        const library = readWorkspaceLibrary();
-        if (key && snapshot) library[key] = snapshot;
-        localStorage.setItem(WORKSPACES_KEY, JSON.stringify(library));
-        syncDesktopAppData(library, preferences);
+        if (desktopAPI) {
+          desktopData = { ...(desktopData || {}), preferences, workspaces: desktopData?.workspaces || {} };
+          if (desktopAPI.savePreferences) desktopAPI.savePreferences(preferences);
+          else desktopAPI.saveAppData({ preferences });
+          if (key && snapshot) await persistMediaSnapshot(key, snapshot);
+        } else {
+          localStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences));
+          const library = readWorkspaceLibrary();
+          if (key && snapshot) library[key] = snapshot;
+          localStorage.setItem(WORKSPACES_KEY, JSON.stringify(library));
+        }
+        if (key) els.notesSaved.textContent = '已保存';
         if (manual) toast(key ? '当前视频工作区已保存' : '播放器设置已保存');
       }
-      catch { toast('本地存储空间不足，请导出工作区'); }
+      catch { if (key) els.notesSaved.textContent = '保存失败'; toast('工作区保存失败，请尝试导出备份'); }
     }, manual ? 0 : 180);
   }
 
@@ -1902,27 +2223,24 @@
       let browserPreferences = {};
       let browserWorkspaces = {};
       if (desktopAPI) {
+        let legacyWorkspaceMigrated = false;
         const saved = await desktopAPI.loadAppData();
         const hasDesktopPreferences = saved?.preferences && Object.keys(saved.preferences).length > 0;
-        const hasDesktopWorkspaces = saved?.workspaces && Object.keys(saved.workspaces).length > 0;
-        // localStorage is only a migration fallback in the desktop build. Avoid
-        // parsing its potentially large thumbnail library on every launch.
-        if (!hasDesktopPreferences || !hasDesktopWorkspaces) {
+        if (!hasDesktopPreferences) {
           legacy = JSON.parse(localStorage.getItem(STORAGE_KEY));
-          if (!hasDesktopPreferences) browserPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY)) || legacy || {};
-          if (!hasDesktopWorkspaces) browserWorkspaces = JSON.parse(localStorage.getItem(WORKSPACES_KEY)) || {};
-          if (!hasDesktopWorkspaces && legacy?.fileMeta) {
+          browserPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY)) || legacy || {};
+          if (legacy?.fileMeta && desktopAPI.saveMediaWorkspace) {
             const legacyKey = mediaKey(legacy.fileMeta);
-            if (!browserWorkspaces[legacyKey]) {
-              browserWorkspaces[legacyKey] = { version:'0.2', fileMeta:legacy.fileMeta, fps:legacy.fps || 24, bookmarks:legacy.bookmarks || [], annotations:legacy.annotations || [], timelineZoom:legacy.timelineZoom || 1, updatedAt:legacy.updatedAt || new Date().toISOString() };
-            }
+            legacyWorkspaceMigrated = await desktopAPI.saveMediaWorkspace(legacyKey, { version:'0.2', fileMeta:legacy.fileMeta, fps:legacy.fps || 24, bookmarks:legacy.bookmarks || [], annotations:legacy.annotations || [], timelineZoom:legacy.timelineZoom || 1, updatedAt:legacy.updatedAt || new Date().toISOString() }).catch(() => false);
           }
         }
         const savedPreferences = hasDesktopPreferences ? saved.preferences : browserPreferences;
-        const savedWorkspaces = hasDesktopWorkspaces ? saved.workspaces : browserWorkspaces;
-        desktopData = { ...(saved || {}), preferences: savedPreferences, workspaces: savedWorkspaces };
-        if (!hasDesktopPreferences || !hasDesktopWorkspaces) syncDesktopAppData(savedWorkspaces, savedPreferences);
-        if (legacy?.fileMeta) localStorage.removeItem(STORAGE_KEY);
+        desktopData = { ...(saved || {}), preferences: savedPreferences, workspaces: {} };
+        if (!hasDesktopPreferences) {
+          if (desktopAPI.savePreferences) desktopAPI.savePreferences(savedPreferences);
+          else desktopAPI.saveAppData({ preferences: savedPreferences });
+        }
+        if (legacyWorkspaceMigrated) localStorage.removeItem(STORAGE_KEY);
       } else {
         legacy = JSON.parse(localStorage.getItem(STORAGE_KEY));
         browserPreferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY)) || legacy || {};
@@ -1948,6 +2266,7 @@
       state.endBehavior = ['stop','rewind','loop'].includes(preferences.endBehavior) ? preferences.endBehavior : 'stop';
       state.playbackSpeed = clamp(Number(preferences.playbackSpeed) || 1, .1, 4);
       state.autoplayOnOpen = preferences.autoplayOnOpen !== false;
+      state.rememberPlaybackPosition = preferences.rememberPlaybackPosition !== false;
       state.startupMode = preferences.startupMode === 'classic' ? 'classic' : 'clean';
       state.timelineHoverPreview = preferences.timelineHoverPreview !== false;
       state.timelineHoverPreviewSize = clamp(Math.round((Number(preferences.timelineHoverPreviewSize) || 196) / 2) * 2, 140, 320);
@@ -1986,8 +2305,11 @@
       setQuickAnnotationTool(state.quickAnnotationTool, false);
       updateAnnotationSizeLabel();
       $('#autosaveSwitch').classList.toggle('on', state.autosave);
+      $('#autosaveSwitch').setAttribute('aria-checked', String(state.autosave));
       $('#autoplaySwitch').classList.toggle('on', state.autoplayOnOpen);
       $('#autoplaySwitch').setAttribute('aria-checked', String(state.autoplayOnOpen));
+      $('#rememberPlaybackPositionSwitch').classList.toggle('on', state.rememberPlaybackPosition);
+      $('#rememberPlaybackPositionSwitch').setAttribute('aria-checked', String(state.rememberPlaybackPosition));
       $('#startupModeSelect').value = state.startupMode;
       $('#guideThirds').checked=state.guideThirds;$('#guideGolden').checked=state.guideGolden;$('#guideSpiral').checked=state.guideSpiral;$('#guideSpiralRotation').value=String(state.guideSpiralRotation);$('#guideCenter').checked=state.guideCenter;$('#guideDiagonal').checked=state.guideDiagonal;$('#guideTriangle').checked=state.guideTriangle;$('#guideSymmetry').checked=state.guideSymmetry;$('#guideActionSafe').checked=state.guideActionSafe;$('#guideTitleSafe').checked=state.guideTitleSafe;$('#guideAspect').value=state.guideAspect;$('#guideOpacity').value=Math.round(state.guideOpacity*100);$('#guideMaskStrength').value=Math.round(state.guideMaskStrength*100);renderCompositionGuides();
       $('#hoverPreviewSwitch').classList.toggle('on', state.timelineHoverPreview);
@@ -2019,8 +2341,40 @@
 
   async function requestOpenVideo() {
     if (!desktopAPI) { els.videoInput.click(); return; }
-    try { openDesktopVideo(await desktopAPI.openVideo()); }
-    catch { toast('无法打开系统文件选择器'); }
+    const probe = beginMediaProbeRequest();
+    try {
+      const media = await desktopAPI.openVideo();
+      if (probe !== state.mediaProbeGeneration) {
+        if (media?._openRequestId) state.cancelledMediaProbeIds.delete(media._openRequestId);
+        return;
+      }
+      state.mediaProbing = false;
+      if (!media) { state.mediaProbing = false; state.activeMediaProbeId = null; document.body.classList.remove('media-loading'); els.viewerStage.removeAttribute('aria-busy'); return; }
+      openDesktopVideo(media);
+    }
+    catch {
+      if (probe !== state.mediaProbeGeneration) return;
+      state.mediaProbing = false; state.activeMediaProbeId = null;
+      document.body.classList.remove('media-loading'); els.viewerStage.removeAttribute('aria-busy');
+      toast('无法打开系统文件选择器');
+    }
+  }
+
+  async function openRecentPath(filePath) {
+    const probe = beginMediaProbeRequest();
+    try {
+      const media = await desktopAPI.openRecentVideo(filePath);
+      if (probe !== state.mediaProbeGeneration) {
+        if (media?._openRequestId) state.cancelledMediaProbeIds.delete(media._openRequestId);
+        return;
+      }
+      openDesktopVideo(media);
+    } catch {
+      if (probe !== state.mediaProbeGeneration) return;
+      state.mediaProbing = false; state.activeMediaProbeId = null;
+      document.body.classList.remove('media-loading'); els.viewerStage.removeAttribute('aria-busy');
+      toast('无法打开最近使用的媒体');
+    }
   }
 
   async function refreshRecentVideos() {
@@ -2038,7 +2392,7 @@
         const date = document.createElement('small'); date.textContent = new Date(item.lastOpened).toLocaleDateString();
         button.append(name, date);
         button.title = item.path;
-        button.addEventListener('click', async () => openDesktopVideo(await desktopAPI.openRecentVideo(item.path)));
+        button.addEventListener('click', () => openRecentPath(item.path));
         list.appendChild(button);
       });
     } catch { container.hidden = true; }
@@ -2052,7 +2406,7 @@
     else if (command === 'loop-in') setLoopPoint('in');
     else if (command === 'loop-out') setLoopPoint('out');
     else if (command === 'reset-view') resetViewerView();
-    else if (command === 'shortcuts') { els.helpModal.classList.add('open'); els.helpModal.setAttribute('aria-hidden', 'false'); }
+    else if (command === 'shortcuts') openHelpModal();
   }
 
   function applyDesktopWindowState(windowState) {
@@ -2096,19 +2450,30 @@
     desktopAPI.onCommand(handleDesktopCommand);
     desktopAPI.onWindowState(applyDesktopWindowState);
     desktopAPI.onWindowInteraction(setWindowInteraction);
+    desktopAPI.onMediaProbe?.(({requestId,name})=>{
+      if(state.activeMediaProbeId&&state.activeMediaProbeId!==requestId)state.cancelledMediaProbeIds.add(state.activeMediaProbeId);
+      state.activeMediaProbeId = requestId || null;
+      state.mediaProbing = true;
+      setStatus(`正在检查 · ${name || '媒体'}`); $('.media-loading-indicator span').textContent = '正在检查媒体或扫描序列…';
+      document.body.classList.add('media-loading'); els.viewerStage.setAttribute('aria-busy','true');
+    });
     $('#clearRecentBtn').addEventListener('click', async () => { await desktopAPI.clearRecentVideos(); refreshRecentVideos(); });
     const { versionPromise, windowStatePromise, launchMediaPromise } = bootstrap;
-    void versionPromise.then(version => {
+    const applyVersion = versionPromise.then(version => {
       $('#runtimeLabel').textContent = `V${version}`;
       $('#runtimeLabel').title = `DESKTOP · V${version}`;
     });
-    void windowStatePromise.then(applyDesktopWindowState);
-    const launchMedia = await launchMediaPromise;
-    if (launchMedia) openDesktopVideo(launchMedia);
-    else {
-      desktopAPI.initialMediaPresented?.();
-      void refreshRecentVideos();
-    }
+    const applyWindowState = windowStatePromise.then(applyDesktopWindowState);
+    void launchMediaPromise.then(launchMedia => {
+      if (launchMedia) openDesktopVideo(launchMedia);
+      else {
+        desktopAPI.initialMediaPresented?.();
+        void refreshRecentVideos();
+      }
+    });
+    // Geometry and visible labels belong to the first complete paint. Media
+    // probing/decoding continues independently and must not delay the window.
+    await Promise.all([applyVersion, applyWindowState]);
   }
 
   function deferNonCriticalWork(callback) {
@@ -2255,7 +2620,7 @@
     const targetTime = frame / state.fps;
     if (Math.abs(playback.currentTime - targetTime) < frameDuration() * .2) {
       if (controller.pendingFrame !== null) pumpResponsiveSeek();
-      else if (!state.timelineScrub && !state.scrub) updateUI(true);
+      else settleResponsiveSeek();
       return;
     }
     controller.inFlight = true;
@@ -2272,7 +2637,7 @@
           Math.abs(decodedFrame - latestTarget) <= Math.abs(displayedFrame - latestTarget)) showPlaybackFrameOverlay(decodedFrame);
     }
     captureFrame(); scheduleColorRender();
-    if (state.annotations.some(annotation => annotation.frame === currentFrame()) && !state.annotationThumbnails[currentFrame()]) {
+    if (annotationsAt(currentFrame()).length && !state.annotationThumbnails[currentFrame()]) {
       updateAnnotationThumbnail(currentFrame()); renderAnnotationList(); saveWorkspace();
     }
     if (state.reverseSeekInFlight) {
@@ -2284,7 +2649,7 @@
       } else if (state.isReverse) state.reverseTimer = requestAnimationFrame(pumpReversePlayback);
       return;
     }
-    if (!controller.inFlight) { updateUI(true); return; }
+    if (!controller.inFlight) { settleResponsiveSeek(); return; }
     controller.inFlight = false;
     if (controller.pendingFrame !== null) {
       state.lastFrameContent = currentFrame();
@@ -2292,8 +2657,7 @@
       pumpResponsiveSeek();
     }
     else {
-      updateUI(true); releaseResponsiveSeekDisplay();
-      if (playback.paused && !state.timelineScrub && !state.scrub) playback.requestSourceFrame?.('exact').catch?.(() => {});
+      settleResponsiveSeek();
     }
   }
 
@@ -2302,7 +2666,7 @@
     e.preventDefault();
     const wasPlaying = !playback.paused && !state.isReverse;
     const wasReverse = state.isReverse;
-    pause('scrub');
+    pause();
     state.timelineScrub = { pointerId: e.pointerId, lastFrame: null, wasPlaying, wasReverse };
     e.currentTarget.setPointerCapture(e.pointerId);
     els.timelineWrap.classList.add('scrubbing');
@@ -2324,9 +2688,7 @@
     state.timelineScrub = null;
     els.timelineWrap.classList.remove('scrubbing');
     els.ruler.classList.remove('scrubbing');
-    if (scrub.wasReverse) reverse();
-    else if (scrub.wasPlaying) play();
-    else { updateMediaOutputTarget('source'); releaseResponsiveSeekDisplay(); }
+    finishResponsiveScrub(scrub);
   }
 
   function cancelTimelineScrub(pointerId) {
@@ -2336,9 +2698,7 @@
     state.timelineScrub = null;
     els.timelineWrap.classList.remove('scrubbing');
     els.ruler.classList.remove('scrubbing');
-    if (scrub.wasReverse) reverse();
-    else if (scrub.wasPlaying) play();
-    else { updateMediaOutputTarget('source'); releaseResponsiveSeekDisplay(); }
+    finishResponsiveScrub(scrub);
   }
 
   function beginScrub(e) {
@@ -2359,7 +2719,7 @@
     const px=e.clientX-state.scrub.startX;
     const movement=Math.hypot(px,e.clientY-state.scrub.startY);
     if(!state.scrub.dragging&&movement<4)return;
-    if(!state.scrub.dragging){state.scrub.dragging=true;pause('scrub');els.viewerStage.classList.add('scrubbing-viewer');}
+    if(!state.scrub.dragging){state.scrub.dragging=true;pause();els.viewerStage.classList.add('scrubbing-viewer');}
     e.preventDefault();
     const factor=e.altKey?1:(e.shiftKey?state.viewerScrubSensitivity*.2:state.viewerScrubSensitivity);
     const next=Math.round(state.scrub.startFrame+px*factor);
@@ -2372,9 +2732,7 @@
     state.scrub=null;
     els.viewerStage.classList.remove('scrubbing-viewer');
     if (wasDragging) {
-      if (wasReverse) reverse();
-      else if (wasPlaying) play();
-      else { updateMediaOutputTarget('source'); releaseResponsiveSeekDisplay(); }
+      finishResponsiveScrub({ wasPlaying, wasReverse });
     } else if (e?.type !== 'pointercancel') {
       playback.paused&&!state.isReverse?play():pause();
       scheduleCleanControlsHide();
@@ -2394,7 +2752,14 @@
     if (!gesture || e.pointerId !== gesture.pointerId) return;
     state.viewerPan.x = gesture.panX + e.clientX - gesture.startX;
     state.viewerPan.y = gesture.panY + e.clientY - gesture.startY;
-    resizeCanvas();
+    const layout = state.viewerLayout;
+    if (layout) {
+      const maxX = Math.max(0, (layout.width - layout.stageWidth) / 2);
+      const maxY = Math.max(0, (layout.height - layout.stageHeight) / 2);
+      state.viewerPan.x = clamp(state.viewerPan.x, -maxX, maxX);
+      state.viewerPan.y = clamp(state.viewerPan.y, -maxY, maxY);
+    }
+    applyViewerPanTransform();
   }
 
   function endViewerPan(e) {
@@ -2416,7 +2781,11 @@
     state.pixelInspector = !!enabled;
     $('#pixelInspectorBtn').classList.toggle('active', state.pixelInspector);
     $('#pixelInspectorBtn').setAttribute('aria-pressed', String(state.pixelInspector));
-    if (!state.pixelInspector) unlockPixelInspector(true);
+    if (!state.pixelInspector) {
+      if (state.pixelInspectorRaf !== null) cancelAnimationFrame(state.pixelInspectorRaf);
+      state.pixelInspectorRaf = null; state.pixelInspectorPending = null;
+      unlockPixelInspector(true);
+    }
     updateMediaOutputTarget();
     if (state.pixelInspector) playback.requestSourceFrame?.('pixel-check').catch?.(() => {});
     toast(state.pixelInspector ? '拾色已开启' : '拾色已关闭');
@@ -2485,12 +2854,17 @@
 
   function inspectPixel(e) {
     if (!state.pixelInspector || state.pixelInspectorLocked) return;
-    const sample = samplePixelAt(e);
-    if (sample) renderPixelSample(sample);
-    else {
-      els.pixelInspectorHud.classList.remove('show');
-      els.pixelInspectorHud.setAttribute('aria-hidden', 'true');
-    }
+    state.pixelInspectorPending = { clientX: e.clientX, clientY: e.clientY };
+    if (state.pixelInspectorRaf !== null) return;
+    state.pixelInspectorRaf = requestAnimationFrame(() => {
+      state.pixelInspectorRaf = null;
+      const sample = samplePixelAt(state.pixelInspectorPending);
+      if (sample) renderPixelSample(sample);
+      else {
+        els.pixelInspectorHud.classList.remove('show');
+        els.pixelInspectorHud.setAttribute('aria-hidden', 'true');
+      }
+    });
   }
 
   async function copyPixelSample() {
@@ -2512,15 +2886,56 @@
     state.contactCandidates=[...candidates.values()].sort((a,b)=>a.frame-b.frame);return state.contactCandidates;
   }
   function renderContactCandidates(){collectContactCandidates();els.contactFrameList.innerHTML='';if(!state.contactCandidates.length){els.contactFrameList.innerHTML='<div class="contact-frame-empty">当前来源中没有可用帧。可添加书签、批注，或先设置 I/O 区间。</div>';return;}state.contactCandidates.forEach(item=>{const label=document.createElement('label');label.className='contact-frame-item';label.innerHTML=`<input type="checkbox" checked><span><b>F ${String(sourceFrame(item.frame)).padStart(5,'0')}</b> · ${formatTimecode(item.frame/state.fps)}<br>${escapeHtml(item.labels.join(' · ')||item.kinds.join(' + '))}</span>`;$('input',label).addEventListener('change',event=>item.selected=event.target.checked);els.contactFrameList.appendChild(label);});}
-  function openContactSheet(){if(!playback.duration){toast('请先打开视频');return;}$('#exportMenu').classList.remove('open');const hasAnnotations=state.annotations.length>0;$('#contactDrawAnnotations').checked=hasAnnotations;renderContactCandidates();els.contactSheetModal.classList.add('open');els.contactSheetModal.setAttribute('aria-hidden','false');}
-  function closeContactSheet(){if(state.contactSheetBusy)return;els.contactSheetModal.classList.remove('open');els.contactSheetModal.setAttribute('aria-hidden','true');}
+  function focusableIn(root) {
+    return $$('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex="-1"])', root).filter(element => !element.hidden && element.getClientRects().length);
+  }
+  function openHelpModal() {
+    state.helpReturnFocus = document.activeElement;
+    renderShortcutEditor();
+    els.helpModal.classList.add('open'); els.helpModal.setAttribute('aria-hidden', 'false');
+    requestAnimationFrame(() => focusableIn(els.helpModal)[0]?.focus());
+  }
+  function closeHelpModal() {
+    if (!els.helpModal.classList.contains('open')) return;
+    els.helpModal.classList.remove('open'); els.helpModal.setAttribute('aria-hidden', 'true');
+    state.helpReturnFocus?.focus?.(); state.helpReturnFocus = null;
+  }
+  function openContactSheet(){
+    if(!playback.duration){toast('请先打开视频');return;}
+    state.contactReturnFocus = document.activeElement;
+    $('#exportMenu').classList.remove('open');const hasAnnotations=state.annotations.length>0;$('#contactDrawAnnotations').checked=hasAnnotations;renderContactCandidates();els.contactSheetModal.classList.add('open');els.contactSheetModal.setAttribute('aria-hidden','false');
+    requestAnimationFrame(() => focusableIn(els.contactSheetModal)[0]?.focus());
+  }
+  function closeContactSheet(){
+    if(state.contactSheetBusy)return;
+    els.contactSheetModal.classList.remove('open');els.contactSheetModal.setAttribute('aria-hidden','true');
+    state.contactReturnFocus?.focus?.(); state.contactReturnFocus = null;
+  }
+  function handleModalKeyboard(event) {
+    const modal = els.contactSheetModal.classList.contains('open') ? els.contactSheetModal : (els.helpModal.classList.contains('open') ? els.helpModal : null);
+    if (!modal) return;
+    if (event.key === 'Escape') {
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (modal === els.contactSheetModal && state.contactSheetBusy) {
+        state.contactSheetCancel = true;
+        $('#cancelContactGenerationBtn').textContent = '正在取消…';
+      } else if (modal === els.contactSheetModal) closeContactSheet(); else closeHelpModal();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const items = focusableIn(modal);
+    if (!items.length) { event.preventDefault(); return; }
+    const first = items[0], last = items.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
   function updateContactProgress(done,total,message){const progress=$('#contactProgress');progress.hidden=false;$('span',progress).textContent=message||`${done} / ${total}`;$('i',progress).style.width=`${total?done/total*100:0}%`;}
   function canvasBlob(canvas){return new Promise((resolve,reject)=>canvas.toBlob(blob=>blob?resolve(blob):reject(new Error('PNG encode failed')),'image/png'));}
   function drawContactLabel(ctx,item,x,y,width,height){ctx.fillStyle='#0d1115';ctx.fillRect(x,y,width,height);ctx.fillStyle='#e0e6ea';ctx.font=`600 ${Math.max(19,Math.round(width*.025))}px Inter, sans-serif`;ctx.fillText(`FRAME ${String(sourceFrame(item.frame)).padStart(5,'0')}`,x+18,y+31);ctx.fillStyle='#91a0ab';ctx.font=`${Math.max(15,Math.round(width*.019))}px ui-monospace, monospace`;ctx.fillText(formatTimecode(item.frame/state.fps),x+18,y+57);ctx.fillStyle='#71808b';ctx.font=`${Math.max(14,Math.round(width*.017))}px Inter, sans-serif`;const text=(item.labels.join(' · ')||item.kinds.join(' + ')).slice(0,80);ctx.fillText(text,x+18,y+height-14,width-36);}
   async function generateContactSheet(){
     const selected=state.contactCandidates.filter(item=>item.selected);if(!selected.length){toast('请至少选择一帧');return;}
     const source=playback.currentSrc||playback.src;if(!source)return;state.contactSheetBusy=true;state.contactSheetCancel=false;$('#generateContactSheetBtn').disabled=true;$('#cancelContactGenerationBtn').hidden=false;$('#closeContactSheetFooterBtn').disabled=true;
-    const media=AstriaPlayback.create();media.muted=true;media.setProjectFps(state.fps);media.open(playback.media);const columns=clamp(Number($('#contactColumns').value)||4,2,5),pageWidth=[1920,2560,3840].includes(Number($('#contactWidth').value))?Number($('#contactWidth').value):3840,includeAnnotations=$('#contactDrawAnnotations').checked,pages=[];
+    const media=AstriaPlayback.create();media.muted=true;media.setProjectFps(state.fps);media.open(playback.media);const columns=clamp(Number($('#contactColumns').value)||4,2,5),pageWidth=[1920,2560,3840].includes(Number($('#contactWidth').value))?Number($('#contactWidth').value):3840,includeAnnotations=$('#contactDrawAnnotations').checked,pages=[];let closeWhenDone=false;
     try{
       if(media.readyState<1)await waitForMediaEvent(media,'loadedmetadata',8000);const pageItems=24,padding=Math.round(pageWidth*.022),gap=Math.round(pageWidth*.007),cellWidth=Math.floor((pageWidth-padding*2-gap*(columns-1))/columns),imageHeight=Math.round(cellWidth*Math.min(1.2,media.videoHeight/Math.max(1,media.videoWidth))),labelHeight=Math.round(clamp(cellWidth*.19,72,142));
       for(let pageIndex=0;pageIndex<Math.ceil(selected.length/pageItems);pageIndex++){
@@ -2532,9 +2947,9 @@
         }
         const blob=await canvasBlob(canvas),bytes=await blob.arrayBuffer(),base=(state.fileName||'Astria').replace(/\.[^.]+$/,'').replace(/[<>:"/\\|?*]/g,'-'),suffix=Math.ceil(selected.length/pageItems)>1?`-${String(pageIndex+1).padStart(2,'0')}`:'';pages.push({name:`${base}-contact-sheet${suffix}.png`,bytes});
       }
-      if(state.contactSheetCancel)throw new DOMException('Canceled','AbortError');let result;if(desktopAPI?.exportBinaryBatch)result=await desktopAPI.exportBinaryBatch(pages);else{pages.forEach(page=>{const link=document.createElement('a');link.href=URL.createObjectURL(new Blob([page.bytes],{type:'image/png'}));link.download=page.name;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);});result={canceled:false};}if(!result?.canceled){toast(`联系表已导出 · ${pages.length} 页`);els.contactSheetModal.classList.remove('open');els.contactSheetModal.setAttribute('aria-hidden','true');}
+      if(state.contactSheetCancel)throw new DOMException('Canceled','AbortError');let result;if(desktopAPI?.exportBinaryBatch)result=await desktopAPI.exportBinaryBatch(pages);else{pages.forEach(page=>{const link=document.createElement('a');link.href=URL.createObjectURL(new Blob([page.bytes],{type:'image/png'}));link.download=page.name;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);});result={canceled:false};}if(!result?.canceled){toast(`联系表已导出 · ${pages.length} 页`);closeWhenDone=true;}
     }catch(error){if(error?.name==='AbortError')toast('已取消联系表生成');else{console.error(error);toast('联系表生成失败');}}
-    finally{media.destroy();state.contactSheetBusy=false;$('#generateContactSheetBtn').disabled=false;$('#cancelContactGenerationBtn').hidden=true;$('#closeContactSheetFooterBtn').disabled=false;$('#contactProgress').hidden=true;}
+    finally{media.destroy();state.contactSheetBusy=false;$('#generateContactSheetBtn').disabled=false;$('#cancelContactGenerationBtn').hidden=true;$('#cancelContactGenerationBtn').textContent='取消生成';$('#closeContactSheetFooterBtn').disabled=false;$('#contactProgress').hidden=true;if(closeWhenDone)closeContactSheet();}
   }
 
   function handlePlaybackEnded() {
@@ -2584,27 +2999,48 @@
     $('#cleanVolumeSlider').addEventListener('change',()=>persistPreferences());
     $('.bottom-dock').addEventListener('pointerleave',()=>scheduleCleanControlsHide());
     $('#ambientSwitch').addEventListener('click',()=>setAmbientEnabled(!ambient.enabled));
-    document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(ambient.timer);ambient.timer=null;}else{ambient.lastSample=-Infinity;scheduleColorRender();}});
+    document.addEventListener('visibilitychange',()=>{
+      if(document.hidden){clearTimeout(ambient.timer);ambient.timer=null;stopPlaybackUiLoop();}
+      else{ambient.lastSample=-Infinity;scheduleColorRender();if(!playback.paused&&!state.isReverse)startPlaybackUiLoop();}
+    });
     playback.addEventListener('frame',event=>{if(event.detail?.seeked){ambient.lastSample=-Infinity;scheduleColorRender();}});
     ['#openVideoBtn','#emptyOpenBtn'].forEach(s=>$(s).addEventListener('click',requestOpenVideo));
-    els.videoInput.addEventListener('change',()=>openVideo(els.videoInput.files[0]));
+    $('#cancelMediaLoadBtn').addEventListener('click',cancelMediaLoad);
+    els.videoInput.addEventListener('change',()=>{const file=els.videoInput.files[0];els.videoInput.value='';openVideo(file);});
     els.viewerStage.addEventListener('dragover',e=>{e.preventDefault();els.viewerStage.classList.add('dragover');});
     els.viewerStage.addEventListener('dragleave',()=>els.viewerStage.classList.remove('dragover'));
     els.viewerStage.addEventListener('drop',e=>{e.preventDefault();els.viewerStage.classList.remove('dragover');openVideo(e.dataTransfer.files[0]);});
+    playback.addEventListener('loading',()=>{
+      setStatus(state.fileMeta?.mediaKind === 'sequence' ? '正在读取图片序列并解码首帧…' : '正在读取媒体信息并解码首帧…');
+      $('.media-loading-indicator span').textContent = '正在解码…';
+      document.body.classList.add('media-loading');
+      els.viewerStage.setAttribute('aria-busy', 'true');
+    });
     playback.addEventListener('metadata',onMetadata);
-    playback.addEventListener('frame',announceInitialMediaPresented,{once:true});
     playback.addEventListener('error',()=>{failMediaLoad();announceInitialMediaPresented(true);setStatus('视频载入失败');toast(playback.error?.message || '无法播放此视频，请检查编码格式');});
-    playback.addEventListener('frame',()=>{presentLoadedMediaFrame();if(playback.paused&&!state.timelineScrub&&!state.scrub&&!state.timelineSeek.inFlight)updateUI();if(!playback.requestVideoFrameCallback){captureFrame();scheduleColorRender();}});
+    playback.addEventListener('frame',event=>{if(!acceptResumeFrame(event))return;announceInitialMediaPresented();presentLoadedMediaFrame();schedulePlaybackPositionSave();if(playback.paused&&!state.timelineScrub&&!state.scrub&&!state.timelineSeek.inFlight)updateUI();if(!playback.requestVideoFrameCallback){captureFrame();scheduleColorRender();}});
     playback.addEventListener('frame',event=>{if(event.detail?.seeked)onResponsiveSeeked();});
     playback.addEventListener('playing',()=>{state.timelineSeek.displayGate=false;state.timelineSeek.displayFrame=null;hideCachedFrame();els.playBtn.classList.add('playing');setStatus('播放中');startPlaybackUiLoop();revealCleanControls();});
     playback.addEventListener('paused',()=>{
       els.playBtn.classList.remove('playing'); stopPlaybackUiLoop();
       if (!state.isReverse) setStatus('已暂停');
-      if (!state.isReverse && !state.timelineScrub && !state.scrub) playback.requestSourceFrame?.('pause').catch?.(() => {});
+      if (!state.mediaAwaitingMetadata) persistPlaybackPositionNow();
       revealCleanControls();
     });
     playback.addEventListener('ended',handlePlaybackEnded);
     els.playBtn.addEventListener('click',()=>playback.paused&&!state.isReverse?play():pause());
+    [[els.currentTimecode, 'time'], [els.frameReadout, 'frame']].forEach(([element, kind]) => {
+      element.addEventListener('focus', () => { pause(); selectEditorText(element); });
+      element.addEventListener('keydown', event => {
+        if (event.key === 'Enter') { event.preventDefault(); element.blur(); }
+        else if (event.key === 'Escape') { event.preventDefault(); resetPositionEditors(); element.blur(); }
+      });
+      element.addEventListener('blur', () => commitPositionEditor(element, kind));
+      element.addEventListener('paste', event => {
+        event.preventDefault();
+        document.execCommand('insertText', false, event.clipboardData?.getData('text/plain') || '');
+      });
+    });
     $('#jumpStartBtn').addEventListener('click',()=>seekFrame(0)); $('#stepBack5Btn').addEventListener('click',()=>step(-5));
     $('#stepBackBtn').addEventListener('click',()=>step(-1)); $('#stepForwardBtn').addEventListener('click',()=>step(1));
     $('#stepForward5Btn').addEventListener('click',()=>step(5)); $('#reverseBtn').addEventListener('click',()=>state.isReverse?stopReverse():reverse());
@@ -2620,6 +3056,21 @@
       $('#autoplaySwitch').setAttribute('aria-checked', String(state.autoplayOnOpen));
       persistPreferences();
       toast(state.autoplayOnOpen ? '打开视频后将自动播放' : '打开视频后将保持暂停');
+    });
+    $('#rememberPlaybackPositionSwitch').addEventListener('click',()=>{
+      state.rememberPlaybackPosition = !state.rememberPlaybackPosition;
+      $('#rememberPlaybackPositionSwitch').classList.toggle('on', state.rememberPlaybackPosition);
+      $('#rememberPlaybackPositionSwitch').setAttribute('aria-checked', String(state.rememberPlaybackPosition));
+      if (state.rememberPlaybackPosition) persistPlaybackPositionNow();
+      else {
+        clearTimeout(state.playbackPositionSaveTimer);
+        state.playbackPositionSaveTimer = null;
+        state.pendingResumePosition = null;
+        state.resumeSeekPending = false;
+        state.resumeTargetPosition = null;
+      }
+      persistPreferences();
+      toast(state.rememberPlaybackPosition ? '将记住每个媒体的播放进度' : '已关闭播放进度记忆');
     });
     $('#startupModeSelect').addEventListener('change',e=>{
       state.startupMode = e.target.value === 'clean' ? 'clean' : 'classic';
@@ -2681,9 +3132,10 @@
 
     document.addEventListener('pointerdown',event=>{
       if(!event.target.closest('#volumeDisclosure'))volumeDisclosure.open=false;
-      if(state.panelOpen&&!event.target.closest('.analysis-panel,#togglePanelBtn'))setPanelOpen(false);
+      if(state.panelOpen&&!event.target.closest('.analysis-panel,#togglePanelBtn,#bookmarkContextMenu'))setPanelOpen(false);
     });
     document.addEventListener('keydown',event=>{
+      if(els.helpModal.classList.contains('open')||els.contactSheetModal.classList.contains('open'))return;
       if(event.key!=='Escape'||(!transportSettings.open&&!volumeDisclosure.open&&!state.panelOpen))return;
       event.preventDefault();event.stopImmediatePropagation();
       if(transportSettings.open){transportSettings.open=false;$('#transportSettings > summary').focus();}
@@ -2735,15 +3187,23 @@
     $('#favoriteFilter').addEventListener('click',()=>{state.favoriteOnly=!state.favoriteOnly;$('#favoriteFilter').classList.toggle('active',state.favoriteOnly);renderBookmarks();});
     $('#listViewBtn').addEventListener('click',()=>{state.view='list';$('#listViewBtn').classList.add('active');$('#gridViewBtn').classList.remove('active');renderBookmarks();});
     $('#gridViewBtn').addEventListener('click',()=>{state.view='grid';$('#gridViewBtn').classList.add('active');$('#listViewBtn').classList.remove('active');renderBookmarks();});
-    els.notes.addEventListener('input',()=>{const b=selectedBookmark();if(!b)return;b.notes=els.notes.value;b.updatedTime=new Date().toISOString();els.notesSaved.textContent='保存中…';clearTimeout(state.saveTimer);state.saveTimer=setTimeout(()=>{saveWorkspace();els.notesSaved.textContent='已保存';},400);});
-    $('#autosaveSwitch').addEventListener('click',()=>{state.autosave=!state.autosave;$('#autosaveSwitch').classList.toggle('on',state.autosave);if(state.autosave)saveWorkspace();});
+    els.notes.addEventListener('input',()=>{const b=selectedBookmark();if(!b)return;b.notes=els.notes.value;b.updatedTime=new Date().toISOString();els.notesSaved.textContent=state.autosave?'保存中…':'未保存 · Ctrl+S';clearTimeout(state.saveTimer);if(state.autosave)state.saveTimer=setTimeout(()=>saveWorkspace(),400);});
+    $('#autosaveSwitch').addEventListener('click',()=>{
+      state.autosave=!state.autosave;
+      $('#autosaveSwitch').classList.toggle('on',state.autosave);
+      $('#autosaveSwitch').setAttribute('aria-checked',String(state.autosave));
+      persistPreferences();
+      if(state.autosave)saveWorkspace();
+      else if(state.currentMediaKey)els.notesSaved.textContent='未保存 · Ctrl+S';
+      toast(state.autosave?'实时自动保存已开启':'实时自动保存已关闭；仍可使用 Ctrl+S 手动保存');
+    });
     els.scrubSensitivity.addEventListener('input',e=>{state.viewerScrubSensitivity=Number(e.target.value);els.scrubSensitivityValue.textContent=`${state.viewerScrubSensitivity.toFixed(2)} 帧/像素`;});
     els.scrubSensitivity.addEventListener('change',()=>saveWorkspace());
     $('#resetWorkspaceBtn').addEventListener('click',()=>{if(!confirm('确定清空当前视频的所有书签、批注、循环区间和笔记吗？'))return;state.bookmarks=[];state.annotations=[];state.loopInFrame=null;state.loopOutFrame=null;state.selectedBookmarkIds=[];state.selectedAnnotationId=null;state.selectedAnnotationFrame=null;removeMediaSnapshot(state.currentMediaKey);renderBookmarks();renderTimeline();renderAnnotationList();syncNotes();updateCounts();toast('当前视频工作区已清空');});
     $$('#bookmarkContextMenu [data-action]').forEach(btn=>btn.addEventListener('click',()=>bookmarkMenuAction(btn.dataset.action)));
     $$('#bookmarkContextMenu [data-color]').forEach(chip=>chip.addEventListener('click',()=>{const b=state.bookmarks.find(item=>item.id===state.contextBookmarkId);if(b){b.color=chip.dataset.color;b.updatedTime=new Date().toISOString();renderBookmarks();renderTimeline();saveWorkspace();}hideBookmarkMenu();}));
 
-    $('#closeHelpBtn').addEventListener('click',()=>els.helpModal.classList.remove('open')); els.helpModal.addEventListener('click',e=>{if(e.target===els.helpModal)els.helpModal.classList.remove('open');});
+    $('#closeHelpBtn').addEventListener('click',closeHelpModal); els.helpModal.addEventListener('click',e=>{if(e.target===els.helpModal)closeHelpModal();});
     $$('#shortcutEditor [data-shortcut-action]').forEach(button=>button.addEventListener('click',()=>{
       if(state.shortcutRecording)finishShortcutRecording();
       state.shortcutRecording=button.dataset.shortcutAction;button.classList.add('recording');$('kbd',button).textContent='按下快捷键';
@@ -2752,7 +3212,11 @@
     state.viewerResizeObserver = new ResizeObserver(scheduleLayoutRefresh);
     state.viewerResizeObserver.observe(els.viewerStage);
     window.addEventListener('resize',scheduleLayoutRefresh);
-    document.addEventListener('pointermove',revealCleanControls,{passive:true});
+    let cleanRevealRaf = null;
+    document.addEventListener('pointermove',()=>{
+      if(cleanRevealRaf!==null)return;
+      cleanRevealRaf=requestAnimationFrame(()=>{cleanRevealRaf=null;revealCleanControls();});
+    },{passive:true});
     $('.radial-center').addEventListener('pointerdown',e=>{if(e.button!==0&&e.button!==2)return;e.preventDefault();e.stopPropagation();hideAnnotationRadialMenu();});
     $('.radial-center').addEventListener('contextmenu',e=>e.preventDefault());
     $('.radial-center').addEventListener('click',hideAnnotationRadialMenu);
@@ -2769,7 +3233,6 @@
     $('#contactSheetBtn').addEventListener('click',()=>{closeClassicTopbarMenus();openContactSheet();});
     $('#topMore').addEventListener('toggle',()=>{if(!$('#topMore').open)setTopExportOpen(false);});
     document.addEventListener('pointerdown',event=>{if(!event.target.closest('#topMore')){$('#topMore').open=false;setTopExportOpen(false);}});
-    const closeContactSheet=()=>{state.contactSheetCancel=true;els.contactSheetModal.classList.remove('open');els.contactSheetModal.setAttribute('aria-hidden','true');};
     $('#closeContactSheetBtn').addEventListener('click',closeContactSheet);
     $('#closeContactSheetFooterBtn').addEventListener('click',closeContactSheet);
     els.contactSheetModal.addEventListener('click',e=>{if(e.target===els.contactSheetModal)closeContactSheet();});
@@ -2778,7 +3241,7 @@
     ['contactBookmarks','contactAnnotations','contactLoop','contactSampleCount'].forEach(id=>$('#'+id).addEventListener('change',renderContactCandidates));
     $('#contactSelectAllBtn').addEventListener('click',()=>{const selected=state.contactCandidates.some(item=>!item.selected);state.contactCandidates.forEach(item=>item.selected=selected);$$('input',els.contactFrameList).forEach(input=>input.checked=selected);});
     document.addEventListener('pointerdown',e=>{if(!e.target.closest('#bookmarkContextMenu'))hideBookmarkMenu();if(!e.target.closest('#annotationTextEditor')&&state.pendingTextAnnotation)cancelTextAnnotation();if(!e.target.closest('#transportSettings'))$('#transportSettings').removeAttribute('open');if(!e.target.closest('.top-tool-popover')){$('#colorViewTool').removeAttribute('open');$('#guideViewTool').removeAttribute('open');}if(!e.target.closest('#exportMenu')&&!e.target.closest('#exportBtn'))setTopExportOpen(false);});
-    $('#helpBtn').addEventListener('click',()=>{closeClassicTopbarMenus();renderShortcutEditor();els.helpModal.classList.add('open');els.helpModal.setAttribute('aria-hidden','false');});
+    $('#helpBtn').addEventListener('click',()=>{closeClassicTopbarMenus();openHelpModal();});
     window.addEventListener('blur',hideTimelinePreview);
     els.timelineWrap.addEventListener('wheel',hideTimelinePreview,{passive:true});
     const topbar = $('.topbar');
@@ -2811,7 +3274,7 @@
         button.addEventListener('click', disable); host.append(button);
       }
     };
-    new MutationObserver(syncActiveReviewTools).observe(topbar, {subtree:true, attributes:true, attributeFilter:['class']});
+    ['#lumaBtn','#pixelInspectorBtn'].forEach(selector => new MutationObserver(syncActiveReviewTools).observe($(selector), {attributes:true, attributeFilter:['class']}));
     new MutationObserver(syncActiveReviewTools).observe(els.guides, {attributes:true, attributeFilter:['class']});
     new MutationObserver(syncActiveReviewTools).observe(els.colorCanvas, {attributes:true, attributeFilter:['class']});
     syncActiveReviewTools();
@@ -2862,7 +3325,7 @@
       classicWindowOutside = true; classicPointerInside = false; closeClassicTopbarMenus(); refreshClassicTopbar();
     });
     document.documentElement.addEventListener('pointerenter', updateClassicTopbar);
-    document.addEventListener('pointermove',updateClassicTopbar,{passive:true});
+    document.addEventListener('pointermove',scheduleClassicTopbarUpdate,{passive:true});
     document.addEventListener('pointerdown',updateClassicTopbar,{passive:true});
     document.documentElement.addEventListener('pointerenter',()=>{
       document.body.classList.remove('clean-pointer-outside');
@@ -2886,6 +3349,7 @@
     $$('.transport details').forEach(menu=>menu.addEventListener('toggle',revealCleanControls));
     window.addEventListener('beforeunload',persistCurrentWorkspaceNow);
     document.addEventListener('keydown',handleShortcut);
+    document.addEventListener('keydown',handleModalKeyboard,true);
   }
 
   function handleShortcut(e) {
@@ -2899,6 +3363,7 @@
       if (reserved.has(shortcut)) { toast('该快捷键由系统操作保留'); finishShortcutRecording(); return; }
       finishShortcutRecording(shortcut); return;
     }
+    if (els.helpModal.classList.contains('open') || els.contactSheetModal.classList.contains('open')) return;
     if (e.key === 'Escape' && !state.cleanMode && $('.topbar').querySelector('details[open], .export-menu.open')) {
       e.preventDefault(); closeClassicTopbarMenus();
       if ($('.topbar').contains(document.activeElement)) document.activeElement.blur();
@@ -2928,8 +3393,8 @@
     else if(e.key.toLowerCase()==='i'&&e.shiftKey){e.preventDefault();clearLoopPoint('in');}
     else if(e.key.toLowerCase()==='o'&&e.shiftKey){e.preventDefault();clearLoopPoint('out');}
     else if(e.key.toLowerCase()==='j')reverse(); else if(e.key.toLowerCase()==='k')pause(); else if(e.key.toLowerCase()==='l')play();
-    else if(e.key==='F1'){e.preventDefault();renderShortcutEditor();els.helpModal.classList.add('open');}
-    else if(e.key==='Delete')deleteSelection(); else if(e.key==='Escape'){els.helpModal.classList.remove('open');}
+    else if(e.key==='F1'){e.preventDefault();openHelpModal();}
+    else if(e.key==='Delete')deleteSelection(); else if(e.key==='Escape'){closeHelpModal();}
   }
 
   const desktopBootstrap = beginDesktopBootstrap();
@@ -2944,4 +3409,6 @@
     };
     window.__astriaReady = true;
   }
+  // Allow one full layout/paint cycle before the native window becomes visible.
+  if (desktopAPI?.rendererReady) requestAnimationFrame(() => requestAnimationFrame(() => desktopAPI.rendererReady()));
 })();

@@ -2,7 +2,8 @@ const { app, BrowserWindow, dialog, ipcMain, Menu, shell, screen } = require('el
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
+const { createHash } = require('node:crypto');
+const { fileURLToPath, pathToFileURL } = require('node:url');
 
 require('./file-associations.cjs')(process.argv);
 if (require('electron-squirrel-startup')) app.quit();
@@ -13,8 +14,8 @@ if (process.platform === 'win32') {
   // a control changes its pressed, focused, or open state.
   // Chromium reads this GPU workaround by its exact underscore-separated name.
   app.commandLine.appendSwitch('disable_direct_composition_video_overlays');
-  // Keep Chromium's compositor active while Windows is running a native
-  // move/resize loop. The player already owns its own visibility throttling.
+  // Native move/resize needs the compositor alive; media presentation itself
+  // is suspended explicitly while the window is minimized.
   app.commandLine.appendSwitch('disable-renderer-backgrounding');
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
   app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
@@ -37,14 +38,16 @@ let store = null;
 let pendingLaunchPath = findMediaArgument(process.argv);
 let deferInitialWindowShow = false;
 let mainWindowReadyToShow = false;
+let rendererUiReady = false;
 let initialMediaPresented = false;
 let initialShowFallback = null;
 let manualWindowResize = null;
+let mediaProbeSerial = 0;
 const isSmokeTest = process.argv.includes('--smoke-test');
 if (isSmokeTest) app.setPath('userData', path.resolve('.cache/desktop-smoke-profile'));
 
 function revealMainWindow() {
-  if (!mainWindow || mainWindow.isDestroyed() || !mainWindowReadyToShow) return;
+  if (!mainWindow || mainWindow.isDestroyed() || !mainWindowReadyToShow || !rendererUiReady) return;
   if (deferInitialWindowShow && !initialMediaPresented) return;
   if (initialShowFallback) clearTimeout(initialShowFallback);
   initialShowFallback = null;
@@ -54,19 +57,126 @@ function revealMainWindow() {
 class DesktopStore {
   constructor(filePath) {
     this.filePath = filePath;
-    this.data = { version: 1, preferences: {}, workspaces: {}, recentVideos: [] };
-    this.writeQueue = Promise.resolve();
+    this.workspaceDirectory = path.join(path.dirname(filePath), 'workspaces');
+    this.data = { version: 2, preferences: {}, recentVideos: [] };
+    this.pendingWrites = new Map();
+    this.workspaceSaves = new Map();
     try {
       const saved = JSON.parse(fs.readFileSync(filePath, 'utf8'));
       if (saved && typeof saved === 'object') {
         this.data = {
-          version: 1,
+          version: 2,
           preferences: saved.preferences && typeof saved.preferences === 'object' ? saved.preferences : {},
-          workspaces: saved.workspaces && typeof saved.workspaces === 'object' ? saved.workspaces : {},
           recentVideos: Array.isArray(saved.recentVideos) ? saved.recentVideos.slice(0, 12) : []
         };
+        if (saved.workspaces && typeof saved.workspaces === 'object') this.migrateWorkspaces(saved.workspaces);
       }
     } catch { /* first run or invalid legacy data */ }
+  }
+
+  workspacePath(key) {
+    const digest = createHash('sha256').update(String(key)).digest('hex');
+    return path.join(this.workspaceDirectory, `${digest}.json`);
+  }
+
+  thumbnailDirectory(key) {
+    const digest = createHash('sha256').update(String(key)).digest('hex');
+    return path.join(this.workspaceDirectory, `${digest}-assets`);
+  }
+
+  thumbnailTokenFile(value) {
+    if (typeof value !== 'string' || !value.startsWith('astria-thumb:')) return null;
+    const file = value.slice(13);
+    return file && path.basename(file) === file && /^[a-zA-Z0-9_-]+\.(?:jpg|png|webp)$/.test(file) ? file : null;
+  }
+
+  async externalizeThumbnails(key, workspace) {
+    const copy = structuredClone(workspace);
+    const directory = this.thumbnailDirectory(key);
+    const used = new Set();
+    const storeThumbnail = async (value, name) => {
+      if (typeof value !== 'string' || !value) return value;
+      if (value.startsWith('astria-thumb:')) {
+        const file = this.thumbnailTokenFile(value);
+        if (!file) return '';
+        used.add(file);
+        return `astria-thumb:${file}`;
+      }
+      if (value.startsWith('file:')) {
+        try {
+          const source = fileURLToPath(value);
+          const sourceDirectory = path.dirname(source);
+          const sameDirectory = process.platform === 'win32'
+            ? sourceDirectory.toLowerCase() === directory.toLowerCase()
+            : sourceDirectory === directory;
+          if (sameDirectory) { const file = path.basename(source); used.add(file); return `astria-thumb:${file}`; }
+        } catch { /* invalid file URLs are left untouched */ }
+        return value;
+      }
+      const match = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(value);
+      if (!match) return value;
+      const extension = match[1] === 'jpeg' ? 'jpg' : match[1];
+      const safeName = String(name).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 100);
+      const file = `${safeName}-${createHash('sha256').update(match[2]).digest('hex').slice(0, 12)}.${extension}`;
+      used.add(file);
+      await fsp.mkdir(directory, { recursive: true });
+      await fsp.writeFile(path.join(directory, file), Buffer.from(match[2], 'base64'));
+      return `astria-thumb:${file}`;
+    };
+    for (const bookmark of copy.bookmarks || []) bookmark.thumbnail = await storeThumbnail(bookmark.thumbnail, `bookmark-${bookmark.id || bookmark.frame}`);
+    for (const [frame, value] of Object.entries(copy.annotationThumbnails || {})) copy.annotationThumbnails[frame] = await storeThumbnail(value, `annotation-${frame}`);
+    return { workspace: copy, used };
+  }
+
+  async cleanupThumbnailAssets(key, used) {
+    const directory = this.thumbnailDirectory(key);
+    try {
+      for (const name of await fsp.readdir(directory)) {
+        if (!used.has(name)) await fsp.unlink(path.join(directory, name)).catch(() => {});
+      }
+    } catch { /* no asset directory yet */ }
+  }
+
+  async resolveThumbnails(key, workspace) {
+    const copy = structuredClone(workspace);
+    const directory = this.thumbnailDirectory(key);
+    const resolve = value => {
+      if (typeof value !== 'string' || !value.startsWith('astria-thumb:')) return value;
+      const file = this.thumbnailTokenFile(value);
+      return file ? pathToFileURL(path.join(directory, file)).href : '';
+    };
+    for (const bookmark of copy.bookmarks || []) bookmark.thumbnail = resolve(bookmark.thumbnail);
+    for (const [frame, value] of Object.entries(copy.annotationThumbnails || {})) copy.annotationThumbnails[frame] = resolve(value);
+    return copy;
+  }
+
+  async portableWorkspace(workspace) {
+    const copy = structuredClone(workspace);
+    const inline = async value => {
+      if (typeof value !== 'string' || !value.startsWith('file:')) return value;
+      try {
+        const source = fileURLToPath(value);
+        const relative = path.relative(this.workspaceDirectory, source);
+        if (!relative || path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) return value;
+        const extension = path.extname(source).toLowerCase();
+        const mime = extension === '.png' ? 'image/png' : extension === '.webp' ? 'image/webp' : 'image/jpeg';
+        return `data:${mime};base64,${(await fsp.readFile(source)).toString('base64')}`;
+      } catch { return ''; }
+    };
+    for (const bookmark of copy.bookmarks || []) bookmark.thumbnail = await inline(bookmark.thumbnail);
+    for (const [frame, value] of Object.entries(copy.annotationThumbnails || {})) copy.annotationThumbnails[frame] = await inline(value);
+    return copy;
+  }
+
+  migrateWorkspaces(workspaces) {
+    try {
+      fs.mkdirSync(this.workspaceDirectory, { recursive: true });
+      for (const [key, workspace] of Object.entries(workspaces)) {
+        const target = this.workspacePath(key);
+        if (!fs.existsSync(target)) fs.writeFileSync(target, JSON.stringify({ key, workspace }), 'utf8');
+      }
+      this.save();
+    } catch (error) { console.error('Unable to migrate workspace data:', error); }
   }
 
   snapshot() {
@@ -75,15 +185,81 @@ class DesktopStore {
 
   updateWorkspaceData(payload) {
     if (!payload || typeof payload !== 'object') return;
-    const next = {
-      preferences: payload.preferences && typeof payload.preferences === 'object' ? payload.preferences : {},
-      workspaces: payload.workspaces && typeof payload.workspaces === 'object' ? payload.workspaces : {}
-    };
-    const serialized = JSON.stringify(next);
-    if (Buffer.byteLength(serialized, 'utf8') > 64 * 1024 * 1024) return;
-    this.data.preferences = next.preferences;
-    this.data.workspaces = next.workspaces;
+    this.updatePreferences(payload.preferences);
+  }
+
+  updatePreferences(preferences) {
+    if (!preferences || typeof preferences !== 'object') return;
+    const serialized = JSON.stringify(preferences);
+    if (Buffer.byteLength(serialized, 'utf8') > 1024 * 1024) return;
+    this.data.preferences = preferences;
     this.save();
+  }
+
+  async loadWorkspace(key) {
+    if (typeof key !== 'string' || !key || key.length > 2048) return null;
+    try {
+      const saved = JSON.parse(await fsp.readFile(this.workspacePath(key), 'utf8'));
+      return saved?.key === key && saved.workspace && typeof saved.workspace === 'object' ? this.resolveThumbnails(key, saved.workspace) : null;
+    } catch { return null; }
+  }
+
+  saveWorkspace(key, workspace) {
+    if (typeof key !== 'string' || !key || key.length > 2048 || !workspace || typeof workspace !== 'object') return false;
+    let snapshot;
+    try { snapshot = structuredClone(workspace); }
+    catch { return false; }
+    const target = this.workspacePath(key);
+    let entry = this.workspaceSaves.get(target);
+    if (!entry) {
+      entry = { latest: null, waiters: [], running: null, lastUsed: new Set(), hasPersisted: false };
+      this.workspaceSaves.set(target, entry);
+    }
+    entry.latest = snapshot;
+    return new Promise(resolve => {
+      entry.waiters.push(resolve);
+      if (entry.running) return;
+      entry.running = (async () => {
+        while (true) {
+          while (entry.latest !== null) {
+            const current = entry.latest;
+            const waiters = entry.waiters.splice(0);
+            entry.latest = null;
+            let saved = false;
+            try {
+              const compact = await this.externalizeThumbnails(key, current);
+              const payload = JSON.stringify({ key, workspace: compact.workspace });
+              if (Buffer.byteLength(payload, 'utf8') <= 64 * 1024 * 1024) {
+                const written = await this.scheduleWrite(target, payload);
+                if (written) {
+                  entry.lastUsed = compact.used;
+                  entry.hasPersisted = true;
+                  saved = true;
+                }
+              }
+            } catch (error) { console.error('Unable to persist media workspace:', error); }
+            waiters.forEach(done => done(saved));
+          }
+          if (entry.hasPersisted) await this.cleanupThumbnailAssets(key, entry.lastUsed);
+          if (entry.latest === null) break;
+          // A newer snapshot arrived while cleanup was yielding; persist it
+          // before retiring this per-media queue.
+        }
+      })().finally(() => {
+        entry.running = null;
+        this.workspaceSaves.delete(target);
+      });
+    });
+  }
+
+  async deleteWorkspace(key) {
+    if (typeof key !== 'string' || !key || key.length > 2048) return false;
+    const target = this.workspacePath(key);
+    const pending = this.workspaceSaves.get(target)?.running;
+    if (pending) await pending.catch(() => {});
+    await fsp.unlink(target).catch(() => {});
+    await fsp.rm(this.thumbnailDirectory(key), { recursive: true, force: true }).catch(() => {});
+    return true;
   }
 
   addRecent(media) {
@@ -108,15 +284,33 @@ class DesktopStore {
 
   save() {
     const payload = JSON.stringify(this.data, null, 2);
-    const tempPath = `${this.filePath}.tmp`;
-    this.writeQueue = this.writeQueue
-      .then(async () => {
-        await fsp.mkdir(path.dirname(this.filePath), { recursive: true });
-        await fsp.writeFile(tempPath, payload, 'utf8');
-        await fsp.rename(tempPath, this.filePath);
-      })
-      .catch(error => console.error('Unable to persist desktop data:', error));
-    return this.writeQueue;
+    return this.scheduleWrite(this.filePath, payload);
+  }
+
+  scheduleWrite(target, payload) {
+    let entry = this.pendingWrites.get(target);
+    if (!entry) {
+      entry = { latest: null, running: null };
+      this.pendingWrites.set(target, entry);
+    }
+    entry.latest = payload;
+    if (!entry.running) {
+      entry.running = (async () => {
+        while (entry.latest !== null) {
+          const current = entry.latest; entry.latest = null;
+          const tempPath = `${target}.${process.pid}.tmp`;
+          await fsp.mkdir(path.dirname(target), { recursive: true });
+          await fsp.writeFile(tempPath, current, 'utf8');
+          await fsp.rename(tempPath, target);
+        }
+        return true;
+      })().catch(error => { console.error('Unable to persist desktop data:', error); return false; }).finally(() => {
+        entry.running = null;
+        if (entry.latest !== null) this.scheduleWrite(target, entry.latest);
+        else this.pendingWrites.delete(target);
+      });
+    }
+    return entry.running;
   }
 }
 
@@ -143,6 +337,18 @@ async function registerRecent(media) {
   rebuildMenu();
 }
 
+function beginMediaProbe(filePath) {
+  const requestId = String(++mediaProbeSerial);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('vfx:media-probe', { requestId, name: path.basename(filePath) });
+  }
+  return requestId;
+}
+
+function tagMediaProbeResult(media, requestId) {
+  return media && typeof media === 'object' ? { ...media, _openRequestId: requestId } : media;
+}
+
 async function openVideoDialog() {
   if (!mainWindow) return null;
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -154,20 +360,22 @@ async function openVideoDialog() {
     ]
   });
   if (result.canceled || !result.filePaths[0]) return null;
+  const requestId = beginMediaProbe(result.filePaths[0]);
   const media = await describeVideo(result.filePaths[0]);
   await registerRecent(media);
-  return media;
+  return tagMediaProbeResult(media, requestId);
 }
 
 async function openRecentVideo(filePath) {
+  const requestId = beginMediaProbe(filePath);
   const media = await describeVideo(filePath);
   if (!media) {
     store.removeRecent(filePath);
     rebuildMenu();
-    return { error: 'missing' };
+    return { error: 'missing', _openRequestId: requestId };
   }
   await registerRecent(media);
-  return media;
+  return tagMediaProbeResult(media, requestId);
 }
 
 function sendCommand(command) {
@@ -274,10 +482,11 @@ function fitCleanVideoWindow(requestedWidth) {
 }
 
 function createWindow() {
-  // Show the stable shell as soon as Chromium is ready. Media presentation is
-  // independent, so launching with a file no longer hides the app until decode.
+  // Wait for the renderer's first complete layout, but not for video decode.
+  // This avoids exposing BrowserWindow's plain background during startup.
   deferInitialWindowShow = false;
   mainWindowReadyToShow = false;
+  rendererUiReady = false;
   initialMediaPresented = true;
   mainWindow = new BrowserWindow({
     width: 1500,
@@ -307,16 +516,18 @@ function createWindow() {
   mainWindow.once('ready-to-show', () => {
     mainWindowReadyToShow = true;
     if (isSmokeTest) { mainWindow.maximize(); broadcastWindowState(); }
-    else if (deferInitialWindowShow && !initialMediaPresented) {
-      initialShowFallback = setTimeout(() => {
-        initialMediaPresented = true;
-        revealMainWindow();
-      }, 4000);
-    } else revealMainWindow();
+    initialShowFallback = setTimeout(() => {
+      rendererUiReady = true;
+      initialMediaPresented = true;
+      revealMainWindow();
+    }, 4000);
+    revealMainWindow();
   });
   mainWindow.webContents.once('did-finish-load', broadcastWindowState);
   ['maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen'].forEach(eventName => mainWindow.on(eventName, broadcastWindowState));
   ['unmaximize', 'leave-full-screen'].forEach(eventName => mainWindow.on(eventName, () => setTimeout(fitCleanVideoWindow, 0)));
+  mainWindow.on('minimize', () => mediaService?.setPresentationSuspended(true));
+  mainWindow.on('restore', () => mediaService?.setPresentationSuspended(false));
   let windowInteractionActive = false;
   let windowInteractionTimer = null;
   const reportWindowInteraction = () => {
@@ -362,6 +573,12 @@ function createWindow() {
   let windowWasInside = null;
   const titlebarHoverTimer = setInterval(() => {
     if (titlebarWindow.isDestroyed() || windowInteractionActive) return;
+    if (!titlebarWindow.isVisible() || titlebarWindow.isMinimized() || !titlebarWindow.isFocused()) {
+      if (windowWasInside) titlebarWindow.webContents.send('vfx:window-pointer', { inside: false });
+      if (titlebarWasInside) titlebarWindow.webContents.send('vfx:titlebar-hover', { inside: false, x: 0, y: 0 });
+      windowWasInside = false; titlebarWasInside = false;
+      return;
+    }
     const bounds = titlebarWindow.getContentBounds();
     const cursor = screen.getCursorScreenPoint();
     const x = cursor.x - bounds.x, y = cursor.y - bounds.y;
@@ -375,7 +592,7 @@ function createWindow() {
     const inside = titlebarWindow.isFocused() && windowInside && y / zoom < 120;
     if (inside || titlebarWasInside) titlebarWindow.webContents.send('vfx:titlebar-hover', { inside, x: x / zoom, y: y / zoom });
     titlebarWasInside = inside;
-  }, 40);
+  }, 80);
   mainWindow.on('closed', () => {
     manualWindowResize = null;
     clearInterval(titlebarHoverTimer);
@@ -397,6 +614,21 @@ function registerIpc() {
   ipcMain.handle('vfx:get-recent-videos', () => store.snapshot().recentVideos);
   ipcMain.handle('vfx:clear-recent-videos', () => { store.clearRecent(); app.clearRecentDocuments(); rebuildMenu(); return true; });
   ipcMain.handle('vfx:load-app-data', () => store.snapshot());
+  ipcMain.handle('vfx:load-media-workspace', (event, key) => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('访问被拒绝');
+    return store.loadWorkspace(key);
+  });
+  ipcMain.on('vfx:save-preferences', (event, preferences) => {
+    if (event.sender === mainWindow?.webContents && event.senderFrame === mainWindow.webContents.mainFrame) store.updatePreferences(preferences);
+  });
+  ipcMain.handle('vfx:save-media-workspace', (event, key, workspace) => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('访问被拒绝');
+    return store.saveWorkspace(key, workspace);
+  });
+  ipcMain.handle('vfx:delete-media-workspace', (event, key) => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('访问被拒绝');
+    return store.deleteWorkspace(key);
+  });
   ipcMain.handle('vfx:get-version', () => app.getVersion());
   ipcMain.handle('vfx:get-window-state', getWindowState);
   ipcMain.handle('vfx:fit-video-window', (event, options) => {
@@ -473,6 +705,11 @@ function registerIpc() {
     await registerRecent(media);
     return media;
   });
+  ipcMain.on('vfx:renderer-ready', event => {
+    if (event.sender !== mainWindow?.webContents) return;
+    rendererUiReady = true;
+    revealMainWindow();
+  });
   ipcMain.on('vfx:initial-media-presented', () => {
     if (!deferInitialWindowShow) return;
     initialMediaPresented = true;
@@ -486,7 +723,8 @@ function registerIpc() {
       filters: [{ name: 'Astria 工作区', extensions: ['json'] }]
     });
     if (result.canceled || !result.filePath) return { canceled: true };
-    await fsp.writeFile(result.filePath, JSON.stringify(payload?.data || {}, null, 2), 'utf8');
+    const portable = await store.portableWorkspace(payload?.data || {});
+    await fsp.writeFile(result.filePath, JSON.stringify(portable, null, 2), 'utf8');
     return { canceled: false, path: result.filePath };
   });
   ipcMain.handle('vfx:export-binary', async (_event, payload) => {

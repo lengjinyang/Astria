@@ -78,7 +78,7 @@ body.media-ready .media-info-top { display: flex; }
 #ambientCanvas {
   position: absolute; left: 50%; top: 50%; translate: -50% -50%;
   z-index: 0; pointer-events: none; opacity: 0;
-  filter: blur(48px) saturate(.9);
+  filter: blur(32px) saturate(.9);
   mask-image: radial-gradient(ellipse closest-side, #000 55%, transparent 100%);
   transition: opacity .4s ease;
 }
@@ -291,7 +291,7 @@ kbd { border: 1px solid #3a414a; background: #1b2026; color: #aeb6c0; border-rad
 .add-bookmark-button { height: 34px; flex: 0 0 auto; margin: 5px 8px 8px; border: 1px solid var(--line); border-radius: 8px; background: #15191e; color: #a9b0b8; cursor: pointer; font-size: 9px; letter-spacing: .04em; }
 .add-bookmark-button:hover { color: #e4e7eb; background: #252b33; border-color: #4b5562; }
 .add-bookmark-button span { margin-right: 5px; font-size: 14px; }
-.add-bookmark-button kbd { float: right; margin: 1px 10px 0 0; }
+.add-bookmark-button kbd { float: right; margin: 1px 10px 0 0; box-shadow: none; }
 .panel-section-title { height: 40px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid var(--line); font-size: 9px; color: #9da6b0; text-transform: uppercase; letter-spacing: .08em; }
 .panel-section-title button { border: 0; background: transparent; color: #626d78; font-size: 8px; cursor: pointer; }
 .annotation-panel-header { padding-left: 7px; }
@@ -2651,13 +2651,19 @@ body:not(.clean-mode).panel-collapsed .workspace { grid-template-columns: minmax
 body:not(.clean-mode) .analysis-panel {
   position: absolute; right: 12px; bottom: 52px; z-index: 34;
   width: min(360px,calc(100% - 24px)); height: min(620px,calc(100% - 68px)); margin: 0;
-  overflow: hidden; border: 1px solid rgba(255,255,255,.075); border-radius: 10px;
-  background: var(--chrome-popover); box-shadow: 0 10px 34px rgba(0,0,0,.36);
+  overflow: hidden; border: 1px solid rgba(255,255,255,.075); border-radius: var(--popover-radius);
+  background: var(--chrome-popover); box-shadow: var(--ui-glass-shadow);
   -webkit-backdrop-filter: blur(32px) saturate(1.15); backdrop-filter: blur(32px) saturate(1.15);
   transform-origin: right bottom;
   transition: opacity .15s ease, translate .15s ease, scale .15s ease;
 }
-body.media-ready.ambient-lit:not(.clean-mode) .analysis-panel { background: var(--chrome-popover); }
+body.media-ready.ambient-lit:not(.clean-mode) .analysis-panel {
+  background: var(--chrome-popover);
+  border-color: rgba(255,255,255,.075);
+  box-shadow: var(--ui-glass-shadow);
+  -webkit-backdrop-filter: blur(32px) saturate(1.15);
+  backdrop-filter: blur(32px) saturate(1.15);
+}
 body:not(.clean-mode).panel-collapsed .analysis-panel {
   opacity: 0; translate: 0 8px; scale: .98; pointer-events: none;
 }
@@ -2675,25 +2681,13 @@ body.media-ready .volume-disclosure .volume-control input {
 .volume-disclosure .volume-control input::-webkit-slider-thumb { margin: 0 0 0 -3px; }
 body.media-ready .volume-disclosure .volume-control output { display: block; width: 36px; text-align: center; }
 
-/* Pure viewing mode keeps its speaker button and reveals the same vertical control above it. */
-body.media-ready.clean-mode .transport .clean-volume { gap: 0; }
-body.media-ready.clean-mode .clean-volume input {
-  position: absolute; left: 2px; bottom: 34px; z-index: 46;
-  display: block; width: 22px; height: 112px; padding: 8px 5px;
-  writing-mode: vertical-lr; direction: rtl;
-  border: 1px solid rgba(255,255,255,.075); border-radius: 8px;
-  background: var(--chrome-popover); box-shadow: 0 6px 18px #0004;
-  opacity: 0; translate: 0 5px; pointer-events: none;
-  transition: opacity .14s ease,translate .14s ease;
-}
-body.media-ready.clean-mode .clean-volume:is(:hover,:focus-within) input { opacity: 1; translate: 0; pointer-events: auto; }
 body.media-ready:not(.clean-mode) .topbar-ambient {
   display: block; position: absolute; inset: 0; overflow: hidden;
   z-index: -1; pointer-events: none; border-radius: inherit;
 }
 #topbarAmbientCanvas {
   position: absolute; translate: -50% -50%; opacity: 0; pointer-events: none;
-  filter: blur(48px) saturate(.9);
+  filter: blur(32px) saturate(.9);
   mask-image: radial-gradient(ellipse closest-side,#000 55%,transparent 100%);
 }
 body.media-ready.ambient-lit #topbarAmbientCanvas { opacity: .45; }
@@ -2793,3 +2787,43 @@ body .topbar .header-media-info .media-info-top { display: flex !important; posi
 
 .missing-frame-notice { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); padding: 7px 12px; color: #fff; background: #8b3d16dd; border-radius: 5px; z-index: 15; pointer-events: none; font-size: 13px; }
 .missing-frame-notice[hidden] { display: none; }
+
+/* Responsive loading and precise position entry. */
+.media-loading-indicator {
+  position: absolute; z-index: 18; left: 50%; top: 50%; display: none; align-items: center; gap: 9px;
+  translate: -50% -50%; padding: 9px 13px; border: 1px solid rgba(255,255,255,.12); border-radius: 9px;
+  background: rgba(12,15,19,.86); color: #c7ced6; font-size: 11px;
+}
+body.media-loading .media-loading-indicator { display: flex; }
+body.media-loading .viewer-empty { display: none; }
+.media-loading-indicator i { width: 13px; height: 13px; border: 2px solid rgba(255,255,255,.2); border-top-color: #d7e1ec; border-radius: 50%; animation: media-loading-spin .75s linear infinite; }
+.media-loading-indicator button { margin-left: 4px; padding: 3px 7px; border: 0; border-radius: 5px; background: rgba(255,255,255,.1); color: #d8dee5; cursor: pointer; }
+@keyframes media-loading-spin { to { rotate: 360deg; } }
+.position-editor { cursor: text; border-radius: 4px; outline: none; }
+.position-editor:focus { background: rgba(255,255,255,.09); box-shadow: 0 0 0 1px rgba(190,207,225,.45); user-select: text; }
+#autosaveSwitch { border: 1px solid #343d47; padding: 2px; }
+.bookmark-card, .annotation-row { content-visibility: auto; contain-intrinsic-size: auto 62px; }
+@media (prefers-reduced-motion: reduce) { .media-loading-indicator i { animation-duration: 1.8s; } }
+
+/* Let the playback header glide in and out instead of appearing abruptly. */
+body.media-ready:not(.clean-mode) .topbar {
+  transform: translate3d(0, -10px, 0);
+  visibility: hidden;
+  transition:
+    opacity .18s ease,
+    transform .24s cubic-bezier(.22, .61, .36, 1),
+    visibility 0s linear .24s;
+  will-change: opacity, transform;
+}
+body.media-ready:not(.clean-mode).classic-topbar-visible .topbar {
+  transform: translate3d(0, 0, 0);
+  visibility: visible;
+  transition-delay: 0s;
+}
+@media (prefers-reduced-motion: reduce) {
+  body.media-ready:not(.clean-mode) .topbar,
+  body.media-ready:not(.clean-mode).classic-topbar-visible .topbar {
+    transform: none;
+    transition: none;
+  }
+}

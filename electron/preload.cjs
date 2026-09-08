@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
     open: (id, mediaId, fps) => ipcRenderer.invoke('media:open', id, mediaId, fps),
     play: id => ipcRenderer.invoke('media:play', id),
     pause: id => ipcRenderer.invoke('media:pause', id),
+    stop: id => ipcRenderer.invoke('media:stop', id),
     seek: (id, seconds) => ipcRenderer.invoke('media:seek', id, seconds),
     step: (id, direction) => ipcRenderer.invoke('media:step', id, direction),
     setSpeed: (id, speed) => ipcRenderer.invoke('media:setSpeed', id, speed),
@@ -46,9 +47,14 @@ contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
   getRecentVideos: () => ipcRenderer.invoke('vfx:get-recent-videos'),
   clearRecentVideos: () => ipcRenderer.invoke('vfx:clear-recent-videos'),
   consumeLaunchMedia: () => ipcRenderer.invoke('vfx:consume-launch-media'),
+  rendererReady: () => ipcRenderer.send('vfx:renderer-ready'),
   initialMediaPresented: () => ipcRenderer.send('vfx:initial-media-presented'),
   loadAppData: () => ipcRenderer.invoke('vfx:load-app-data'),
   saveAppData: data => ipcRenderer.send('vfx:save-app-data', data),
+  loadMediaWorkspace: key => ipcRenderer.invoke('vfx:load-media-workspace', key),
+  savePreferences: preferences => ipcRenderer.send('vfx:save-preferences', preferences),
+  saveMediaWorkspace: (key, workspace) => ipcRenderer.invoke('vfx:save-media-workspace', key, workspace),
+  deleteMediaWorkspace: key => ipcRenderer.invoke('vfx:delete-media-workspace', key),
   exportWorkspace: (suggestedName, data) => ipcRenderer.invoke('vfx:export-workspace', { suggestedName, data }),
   exportBinary: (suggestedName, extension, bytes) => ipcRenderer.invoke('vfx:export-binary', { suggestedName, extension, bytes }),
   exportBinaryBatch: files => ipcRenderer.invoke('vfx:export-binary-batch', { files }),
@@ -69,5 +75,6 @@ contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
   onTitlebarHover: callback => on('vfx:titlebar-hover', callback),
   onWindowPointer: callback => on('vfx:window-pointer', callback),
   onWindowInteraction: callback => on('vfx:window-interaction', callback),
-  onWindowState: callback => on('vfx:window-state', callback)
+  onWindowState: callback => on('vfx:window-state', callback),
+  onMediaProbe: callback => on('vfx:media-probe', callback)
 }));

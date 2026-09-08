@@ -30,6 +30,7 @@
     open(media) { this.media = media; this.emit('loading'); this.element.preload = 'auto'; this.element.src = media.url; this.element.load(); }
     play() { this.stopReverse(); return this.element.play(); }
     pause() { this.stopReverse(); this.element.pause(); }
+    stop() { this.pause(); this.element.removeAttribute('src'); this.element.load(); }
     seek(time) { this.element.currentTime = time; }
     step(direction) { this.pause(); this.seek(Math.max(0, Math.min(this.duration, this.currentTime + direction / this.projectFps))); }
     setSpeed(value) { this.element.playbackRate = value; }
@@ -139,6 +140,7 @@
     }
     play() { this.stopReverse(); this.stepping = false; return this.call('play'); }
     pause() { this.stopReverse(); if (this.session) this.fire('pause'); }
+    stop() { this.stopReverse(); if (this.session) this.fire('stop'); this.readyState = 0; }
     seek(time) { this.seeking = true; this.fire('seek', time); }
     step(direction) { this.pause(); this.stepping = true; this.seeking = true; this.fire('step', direction); }
     setSpeed(value) { this._speed = value; if (this.session) this.fire('setSpeed', value); }
@@ -225,9 +227,11 @@
       const gl = this.gl;
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
       gl.useProgram(this.program); gl.bindTexture(gl.TEXTURE_2D, this.texture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      if (this.textureWidth !== this.canvas.width || this.textureHeight !== this.canvas.height) {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+        this.textureWidth = this.canvas.width; this.textureHeight = this.canvas.height;
+      } else gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
-      gl.flush();
     }
     destroy() {
       if (!this.gl) return;
@@ -248,9 +252,16 @@
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     }
     draw(frame) {
-      const gl = this.gl; this.canvas.width = frame.width; this.canvas.height = frame.height;
+      const gl = this.gl;
+      const resized = this.canvas.width !== frame.width || this.canvas.height !== frame.height;
+      if (resized) { this.canvas.width = frame.width; this.canvas.height = frame.height; }
       gl.viewport(0,0,frame.width,frame.height); gl.useProgram(this.program); gl.bindTexture(gl.TEXTURE_2D,this.texture);
-      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,frame.width,frame.height,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(frame.rgba)); gl.drawArrays(gl.TRIANGLES,0,3);
+      const pixels = new Uint8Array(frame.rgba);
+      if (resized || this.textureWidth !== frame.width || this.textureHeight !== frame.height) {
+        gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,frame.width,frame.height,0,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+        this.textureWidth = frame.width; this.textureHeight = frame.height;
+      } else gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,frame.width,frame.height,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+      gl.drawArrays(gl.TRIANGLES,0,3);
     }
     destroy() { this.gl.deleteTexture(this.texture); this.gl.deleteProgram(this.program); }
   }

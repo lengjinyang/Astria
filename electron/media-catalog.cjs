@@ -32,13 +32,16 @@ class MediaCatalog {
     const name = path.basename(resolved), extension = path.extname(name).slice(1).toLowerCase();
     const descriptor = { path: resolved, url: pathToFileURL(resolved).href, name, displayName: name,
       size: stat.size, lastModified: stat.mtimeMs, mediaKind: 'video', sourceFrameOffset: 0,
-      width: 0, height: 0, duration: 0, fps: 24, sourceFps: null, totalFrames: 0, missingFrames: [], type: 'video/*' };
-    let files = null;
+      width: 0, height: 0, duration: 0, fps: 24, sourceFps: null, totalFrames: 0, missingFrameRanges: [], type: 'video/*' };
+    let sequenceFiles = null;
     if (formats.image.includes(extension)) {
       const match = /^(.*?)(\d+)(\.[^.]+)$/.exec(name);
       const directory = path.dirname(resolved);
       const sequence = { directory: directory.toLowerCase(), prefix: (match?.[1] || path.parse(name).name).toLowerCase(),
         digits: match?.[2].length || 0, extension, single: !match };
+      descriptor.mediaId = 'sequence:' + createHash('sha256').update(JSON.stringify(sequence)).digest('hex');
+      const activeEntry = this.entries.get(descriptor.mediaId);
+      if (activeEntry?.consumers.size) return activeEntry.descriptor;
       const numbered = new Map();
       if (match) {
         for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
@@ -54,37 +57,71 @@ class MediaCatalog {
       const numbers = [...numbered.keys()].sort((a,b) => a-b);
       const first = numbers[0], last = numbers.at(-1);
       if (last - first > 1000000) throw new Error('序列跨度超过 1,000,000 帧');
-      files = []; let previous = numbered.get(first);
-      for (let n = first; n <= last; n++) {
-        if (numbered.has(n)) previous = numbered.get(n);
-        else descriptor.missingFrames.push(n);
-        if (/[\r\n]/.test(previous) || Buffer.byteLength(previous, 'utf8') > 500) throw new Error('序列文件名过长或包含换行');
-        files.push(previous);
+      for (let index = 1; index < numbers.length; index++) {
+        const gapStart = numbers[index - 1] + 1, gapEnd = numbers[index] - 1;
+        if (gapStart <= gapEnd) descriptor.missingFrameRanges.push([gapStart, gapEnd]);
       }
-      Object.assign(descriptor, { mediaKind: 'sequence', sourceFps: 24, sourceFrameOffset: first, totalFrames: files.length,
-        duration: files.length / 24, sequence, type: `image/${extension}` });
-      descriptor.mediaId = 'sequence:' + createHash('sha256').update(JSON.stringify(sequence)).digest('hex');
+      for (const filePath of numbered.values()) {
+        if (/[\r\n]/.test(filePath) || Buffer.byteLength(filePath, 'utf8') > 500) throw new Error('序列文件名过长或包含换行');
+      }
+      sequenceFiles = { first, last, numbered };
+      const totalFrames = last - first + 1;
+      Object.assign(descriptor, { mediaKind: 'sequence', sourceFps: 24, sourceFrameOffset: first, totalFrames,
+        duration: totalFrames / 24, sequence, type: `image/${extension}` });
     } else {
       const identity = { path: resolved.toLowerCase(), size: stat.size, lastModified: stat.mtimeMs };
       descriptor.mediaId = 'video:' + createHash('sha256').update(JSON.stringify(identity)).digest('hex');
     }
     const previousEntry = this.entries.get(descriptor.mediaId);
+    if (previousEntry?.consumers.size) return previousEntry.descriptor;
+    if (previousEntry?.expiry) clearTimeout(previousEntry.expiry);
     if (previousEntry?.manifest) await fs.unlink(previousEntry.manifest).catch(() => {});
-    this.entries.set(descriptor.mediaId, { descriptor, files, manifest: null });
+    const entry = { descriptor, sequenceFiles, manifest: null, manifestPromise: null, consumers: new Set(), expiry: null };
+    entry.expiry = setTimeout(() => {
+      if (this.entries.get(descriptor.mediaId) === entry && !entry.consumers.size) void this.release(descriptor.mediaId);
+    }, 60000);
+    entry.expiry.unref?.();
+    this.entries.set(descriptor.mediaId, entry);
     return descriptor;
   }
-  async source(id, fps = 24) {
+  async source(id, fps = 24, consumerId = null) {
     const entry = this.entries.get(id);
     if (!entry) throw new Error('媒体授权已失效，请重新打开');
     if (!Number.isFinite(fps) || fps < 1 || fps > 240) throw new Error('无效帧率');
-    if (!entry.files) return { source: entry.descriptor.path, descriptor: entry.descriptor };
-    if (!entry.manifest) {
-      entry.manifest = path.join(this.cacheDirectory, `astria-sequence-${randomUUID()}.txt`);
-      await fs.writeFile(entry.manifest, entry.files.join('\n') + '\n', 'utf8');
-    }
-    return { source: `mf://@${entry.manifest}`, descriptor: { ...entry.descriptor, fps, duration: entry.files.length / fps } };
+    if (entry.expiry) { clearTimeout(entry.expiry); entry.expiry = null; }
+    if (consumerId) entry.consumers.add(consumerId);
+    if (!entry.sequenceFiles) return { source: entry.descriptor.path, descriptor: entry.descriptor };
+    if (!entry.manifestPromise) entry.manifestPromise = this.writeManifest(entry);
+    await entry.manifestPromise;
+    return { source: `mf://@${entry.manifest}`, descriptor: { ...entry.descriptor, fps, duration: entry.descriptor.totalFrames / fps } };
+  }
+  async writeManifest(entry) {
+    entry.manifest = path.join(this.cacheDirectory, `astria-sequence-${randomUUID()}.txt`);
+    const handle = await fs.open(entry.manifest, 'w');
+    try {
+      const { first, last, numbered } = entry.sequenceFiles;
+      let previous = numbered.get(first), lines = [];
+      for (let frame = first; frame <= last; frame++) {
+        if (numbered.has(frame)) previous = numbered.get(frame);
+        lines.push(previous);
+        if (lines.length >= 4096) { await handle.write(lines.join('\n') + '\n'); lines = []; }
+      }
+      if (lines.length) await handle.write(lines.join('\n') + '\n');
+    } finally { await handle.close(); }
+  }
+  async release(id, consumerId) {
+    const entry = this.entries.get(id);
+    if (!entry) return;
+    if (consumerId) entry.consumers.delete(consumerId);
+    if (entry.consumers.size) return;
+    if (entry.expiry) clearTimeout(entry.expiry);
+    if (entry.manifestPromise) await entry.manifestPromise.catch(() => {});
+    if (entry.consumers.size || this.entries.get(id) !== entry) return;
+    if (entry.manifest) await fs.unlink(entry.manifest).catch(() => {});
+    this.entries.delete(id);
   }
   async dispose() {
+    for (const entry of this.entries.values()) if (entry.expiry) clearTimeout(entry.expiry);
     await Promise.all([...this.entries.values()].filter(e => e.manifest).map(e => fs.unlink(e.manifest).catch(() => {})));
     this.entries.clear();
   }

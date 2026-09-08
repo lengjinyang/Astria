@@ -116,6 +116,7 @@
       <section class="viewer-column">
         <div class="clean-drag-region" aria-hidden="true"></div>
         <div class="viewer-stage" id="viewerStage">
+          <div class="media-loading-indicator" role="status" aria-live="polite"><i></i><span>正在准备画面…</span><button type="button" id="cancelMediaLoadBtn">取消</button></div>
           <div class="clean-window-controls" aria-label="窗口控制">
             <button class="window-control-button" id="cleanWindowMinimizeBtn" title="最小化" aria-label="最小化">
               <svg viewBox="0 0 24 24"><path d="M6 12h12"/></svg>
@@ -177,11 +178,11 @@
             <button class="transport-btn" id="reverseBtn" title="倒放 (J)"><svg viewBox="0 0 24 24"><path d="M7 5v14M18 6l-9 6 9 6z"/></svg><span class="mini-label">REV</span></button>
           </div>
           <div class="timecode-block">
-            <span class="current-timecode" id="currentTimecode">00:00:00:00</span>
+            <span class="current-timecode position-editor" id="currentTimecode" contenteditable="plaintext-only" role="textbox" aria-label="当前时间码，可输入后按回车跳转" spellcheck="false">00:00:00:00</span>
             <span class="slash">/</span>
             <span id="durationTimecode">00:00:00:00</span>
             <span class="transport-rule"></span>
-            <span class="timeline-readout"><b id="frameReadout">FRAME 00000</b><span id="secondsReadout">0.000 SEC</span></span>
+            <span class="timeline-readout"><b class="position-editor" id="frameReadout" contenteditable="plaintext-only" role="textbox" aria-label="当前帧号，可输入后按回车跳转" spellcheck="false">FRAME 00000</b><span id="secondsReadout">0.000 SEC</span></span>
           </div>
           <div class="transport-right">
             <details class="volume-disclosure" id="volumeDisclosure">
@@ -199,6 +200,7 @@
                 <input id="fpsInput" type="number" value="24" min="1" max="240" step="0.001" hidden aria-hidden="true">
                 <div class="settings-row speed-settings-row"><span>播放速度</span><div class="speed-control"><button id="speedDownBtn" title="降低 0.05×">−</button><input id="speedRange" type="range" min="0.1" max="4" value="1" step="0.05" aria-label="播放速度"><input id="speedNumber" type="number" min="0.1" max="4" value="1.00" step="0.05" aria-label="精确播放速度"><span>×</span><button id="speedResetBtn" title="恢复 1.00×">↺</button><button id="speedUpBtn" title="提高 0.05×">＋</button></div></div>
                 <div class="settings-row"><span>打开后自动播放</span><button class="settings-switch on" id="autoplaySwitch" type="button" role="switch" aria-checked="true" title="打开视频后自动播放"><i></i></button></div>
+                <div class="settings-row"><span>记忆播放进度</span><button class="settings-switch on" id="rememberPlaybackPositionSwitch" type="button" role="switch" aria-checked="true" title="重新打开媒体时从上次位置继续"><i></i></button></div>
                 <label class="settings-row"><span>播放结束后</span><select id="endBehaviorSelect"><option value="stop">停在最后一帧</option><option value="rewind">返回第一帧</option><option value="loop">循环播放</option></select></label>
                 <div class="settings-section-label">画面</div>
                 <div class="settings-row"><span>影院灯效</span><button class="settings-switch on" id="ambientSwitch" type="button" role="switch" aria-checked="true" aria-label="影院灯效"><i></i></button></div>
@@ -310,7 +312,7 @@
             <dl>
               <div><dt>书签</dt><dd id="propBookmarks">0</dd></div>
               <div><dt>批注帧</dt><dd id="propAnnotations">0</dd></div>
-              <div><dt>自动保存</dt><dd><span class="switch on" id="autosaveSwitch"><i></i></span></dd></div>
+              <div><dt>实时自动保存</dt><dd><button type="button" class="switch on" id="autosaveSwitch" role="switch" aria-checked="true" aria-label="实时自动保存"><i></i></button></dd></div>
             </dl>
           </div>
           <div class="property-group interaction-settings">
