@@ -2,9 +2,14 @@ const { contextBridge, ipcRenderer, sharedTexture, webUtils } = require('electro
 
 const textureCallbacks = new Map();
 if (sharedTexture) sharedTexture.setSharedTextureReceiver(async ({ importedSharedTexture }, id, metadata = {}) => {
-  const frame = importedSharedTexture.getVideoFrame();
-  try { for (const callback of textureCallbacks.get(id) || []) await callback(frame, metadata); }
-  finally { frame.close(); importedSharedTexture.release(); }
+  let frame = null;
+  try {
+    frame = importedSharedTexture.getVideoFrame();
+    for (const callback of textureCallbacks.get(id) || []) await callback(frame, metadata);
+  } finally {
+    try { frame?.close(); }
+    finally { importedSharedTexture.release(); }
+  }
 });
 
 const on = (channel, callback) => {
@@ -19,7 +24,7 @@ contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
   platform: process.platform,
   media: Object.freeze({
     create: () => ipcRenderer.invoke('media:create'),
-    open: (id, mediaId, fps) => ipcRenderer.invoke('media:open', id, mediaId, fps),
+    open: (id, mediaId, fps, startTime = 0) => ipcRenderer.invoke('media:open', id, mediaId, fps, startTime),
     play: id => ipcRenderer.invoke('media:play', id),
     pause: id => ipcRenderer.invoke('media:pause', id),
     stop: id => ipcRenderer.invoke('media:stop', id),
@@ -32,6 +37,7 @@ contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
     requestSourceFrame: (id, request) => ipcRenderer.invoke('media:requestSourceFrame', id, request),
     captureFrame: id => ipcRenderer.invoke('media:captureFrame', id),
     destroy: id => ipcRenderer.invoke('media:destroy', id),
+    destroyAll: () => ipcRenderer.invoke('media:destroyAll'),
     onState: callback => on('media:state', callback),
     onFrame: callback => on('media:frame', callback),
     onSharedTextureFrame: (id, callback) => {
@@ -52,6 +58,7 @@ contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
   loadAppData: () => ipcRenderer.invoke('vfx:load-app-data'),
   saveAppData: data => ipcRenderer.send('vfx:save-app-data', data),
   loadMediaWorkspace: key => ipcRenderer.invoke('vfx:load-media-workspace', key),
+  loadMediaLaunchState: key => ipcRenderer.invoke('vfx:load-media-launch-state', key),
   savePreferences: preferences => ipcRenderer.send('vfx:save-preferences', preferences),
   saveMediaWorkspace: (key, workspace) => ipcRenderer.invoke('vfx:save-media-workspace', key, workspace),
   deleteMediaWorkspace: key => ipcRenderer.invoke('vfx:delete-media-workspace', key),
@@ -69,6 +76,7 @@ contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
   updateWindowResize: point => ipcRenderer.send('vfx:window-resize-update', point),
   endWindowResize: () => ipcRenderer.send('vfx:window-resize-end'),
   closeWindow: () => ipcRenderer.invoke('vfx:window-close'),
+  rendererCloseReady: () => ipcRenderer.send('vfx:renderer-close-ready'),
   toggleFullscreen: () => ipcRenderer.invoke('vfx:toggle-fullscreen'),
   onOpenVideo: callback => on('vfx:open-video-from-system', callback),
   onCommand: callback => on('vfx:command', callback),
@@ -76,5 +84,6 @@ contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
   onWindowPointer: callback => on('vfx:window-pointer', callback),
   onWindowInteraction: callback => on('vfx:window-interaction', callback),
   onWindowState: callback => on('vfx:window-state', callback),
+  onPrepareClose: callback => on('vfx:prepare-close', callback),
   onMediaProbe: callback => on('vfx:media-probe', callback)
 }));

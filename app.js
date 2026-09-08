@@ -58,7 +58,7 @@
     viewerZoomMode: 'fit', viewerZoom: 1, viewerPan: { x: 0, y: 0 }, viewerPanGesture: null,
     endBehavior: 'stop', panelOpen: false, viewerResizeObserver: null, viewerResizeRaf: null,
     playbackSpeed: 1, shortcuts: { ...DEFAULT_SHORTCUTS }, shortcutRecording: null, pixelInspector: false, timelineHoverPreview: true, timelineHoverPreviewSize: 196,
-    autoplayOnOpen: true, rememberPlaybackPosition: true, pendingResumePosition: null, resumeSeekPending: false, resumeTargetPosition: null, startupMode: 'clean', startupModeApplied: false,
+    autoplayOnOpen: true, rememberPlaybackPosition: true, playbackPoster: '', playbackPosterDirty: false, mediaPosterPresented: false, currentWorkspaceReady: true, pendingResumePosition: null, resumeSeekPending: false, resumeTargetPosition: null, resumePositionAppliedAtOpen: false, resumeCorrectionRequested: false, resumePresentationTimer: null, startupMode: 'clean', startupModeApplied: false,
 
     pixelInspectorLocked: false, pixelSample: null, pixelSampleCanvas: null,
     annotationThumbnails: {},
@@ -1140,6 +1140,10 @@
     if (!state.mediaAwaitingFirstFrame || state.mediaAwaitingMetadata) return;
     const generation = state.mediaLoadGeneration;
     const hadTransitionFrame = state.mediaReplacing;
+    clearTimeout(state.resumePresentationTimer);
+    state.resumePresentationTimer = null;
+    state.resumeCorrectionRequested = false;
+    state.mediaPosterPresented = false;
     state.mediaAwaitingFirstFrame = false;
     state.mediaReplacing = false;
     document.body.classList.remove('media-loading');
@@ -1178,6 +1182,10 @@
   }
 
   function failMediaLoad() {
+    clearTimeout(state.resumePresentationTimer);
+    state.resumePresentationTimer = null;
+    state.resumeCorrectionRequested = false;
+    state.mediaPosterPresented = false;
     state.mediaAwaitingMetadata = false;
     state.mediaAwaitingFirstFrame = false;
     state.mediaReplacing = false;
@@ -1189,13 +1197,62 @@
     setMediaReady(false);
   }
 
+  function capturePlaybackPoster() {
+    if (playback.readyState < 2 || !playback.videoWidth || !playback.currentFrameCanvas) return;
+    let source = playback.currentFrameCanvas;
+    if (state.colorPreset !== 'original' && els.colorCanvas.width && els.colorCanvas.height) source = els.colorCanvas;
+    else if (els.cacheCanvas.classList.contains('visible') && els.cacheCanvas.width && els.cacheCanvas.height) source = els.cacheCanvas;
+    const sourceWidth = source.width || playback.videoWidth, sourceHeight = source.height || playback.videoHeight;
+    const scale = Math.min(1, 960 / sourceWidth, 540 / sourceHeight);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(2, Math.round(sourceWidth * scale));
+    canvas.height = Math.max(2, Math.round(sourceHeight * scale));
+    try {
+      canvas.getContext('2d', { alpha: false }).drawImage(source, 0, 0, canvas.width, canvas.height);
+      state.playbackPoster = canvas.toDataURL('image/jpeg', .72);
+      state.playbackPosterDirty = true;
+    } catch { /* poster caching must never interrupt playback */ }
+  }
+
+  function showPlaybackPoster(source, generation) {
+    if (!source) return;
+    const image = new Image();
+    image.onload = () => {
+      if (generation !== state.mediaLoadGeneration || !state.mediaAwaitingFirstFrame) return;
+      clearMediaTransitionFrame();
+      const layoutPoster = () => {
+        const stage = els.viewerStage.getBoundingClientRect();
+        const scale = Math.min(stage.width / image.naturalWidth, stage.height / image.naturalHeight);
+        els.mediaSurface.style.width = `${Math.max(2, image.naturalWidth * scale)}px`;
+        els.mediaSurface.style.height = `${Math.max(2, image.naturalHeight * scale)}px`;
+      };
+      layoutPoster();
+      mediaTransitionCanvas.width = image.naturalWidth;
+      mediaTransitionCanvas.height = image.naturalHeight;
+      mediaTransitionCanvas.getContext('2d', { alpha: false }).drawImage(image, 0, 0);
+      mediaTransitionCanvas.classList.add('visible');
+      els.viewerStage.classList.add('has-video');
+      state.mediaReplacing = true;
+      state.mediaPosterPresented = true;
+      document.body.classList.remove('media-loading');
+      els.viewerStage.removeAttribute('aria-busy');
+      setStatus('正在准备播放');
+      announceInitialMediaPresented(true);
+      requestAnimationFrame(() => {
+        if (generation === state.mediaLoadGeneration && state.mediaPosterPresented) layoutPoster();
+      });
+    };
+    image.src = source;
+  }
+
   function cancelMediaLoad() {
     if (!state.mediaProbing && !state.mediaAwaitingMetadata && !state.mediaAwaitingFirstFrame) return;
     state.mediaProbeGeneration += 1;
     if (state.activeMediaProbeId) state.cancelledMediaProbeIds.add(state.activeMediaProbeId);
     state.activeMediaProbeId = null; state.mediaProbing = false;
     state.mediaLoadGeneration += 1;
-    state.mediaAwaitingMetadata = false; state.mediaAwaitingFirstFrame = false; state.mediaReplacing = false;
+    state.mediaAwaitingMetadata = false; state.mediaAwaitingFirstFrame = false; state.mediaReplacing = false; state.mediaPosterPresented = false;
+    clearTimeout(state.resumePresentationTimer); state.resumePresentationTimer = null; state.resumeCorrectionRequested = false;
     playback.stop?.();
     clearMediaPresentationAnimation(); clearMediaTransitionFrame();
     document.body.classList.remove('media-loading'); els.viewerStage.removeAttribute('aria-busy');
@@ -1210,7 +1267,12 @@
 
   async function loadMediaSource(media, ownedObjectUrl = null) {
     if (!media?.url || !media?.name) { toast('请选择有效的视频文件'); return; }
+    if (typeof playback.ensureSession === 'function') void playback.ensureSession().catch(() => {});
     setStatus(`正在打开 · ${media.name}`);
+    els.projectName.textContent = media.name;
+    els.projectName.title = media.name;
+    document.title = `${media.name} — Astria`;
+    desktopAPI?.setWindowTitle(`${media.name} — Astria`);
     $('.media-loading-indicator span').textContent = media.mediaKind === 'sequence' ? '正在扫描图片序列…' : '正在读取媒体…';
     document.body.classList.add('media-loading');
     els.viewerStage.setAttribute('aria-busy', 'true');
@@ -1230,6 +1292,8 @@
     state.mediaAwaitingMetadata = true;
     state.mediaAwaitingFirstFrame = true;
     state.mediaReplacing = replacingMedia;
+    state.mediaPosterPresented = false;
+    clearTimeout(state.resumePresentationTimer); state.resumePresentationTimer = null; state.resumeCorrectionRequested = false;
     if (!replacingMedia) {
       clearMediaTransitionFrame();
       setMediaReady(false);
@@ -1242,15 +1306,44 @@
     state.fileName = media.name;
     state.fileMeta = { name: media.name, size: media.size || 0, type: media.type || 'video/*', modified: media.lastModified || 0, path: media.path || null, mediaId: media.mediaId, mediaKind: media.mediaKind || 'video', sourceFps: media.sourceFps || null, sourceFrameOffset: media.sourceFrameOffset || 0, sequence: media.sequence || null };
     const generation = state.mediaLoadGeneration;
-    const activated = await activateMediaWorkspace(state.fileMeta, generation).catch(() => generation === state.mediaLoadGeneration);
+    state.currentWorkspaceReady = false;
+    state.bookmarks = []; state.annotations = []; state.annotationThumbnails = {}; state.playbackPoster = ''; state.playbackPosterDirty = false;
+    renderBookmarks(); renderAnnotationList(); updateCounts();
+    let releaseWorkspaceApply;
+    const workspaceApplyGate = new Promise(resolve => { releaseWorkspaceApply = resolve; });
+    const activationOptions = { applyGate: workspaceApplyGate, skipLaunchState: false };
+    const activationPromise = activateMediaWorkspace(state.fileMeta, generation, activationOptions).catch(() => false);
+    const launchState = desktopAPI?.loadMediaLaunchState && media.mediaId
+      ? await desktopAPI.loadMediaLaunchState(media.mediaId).catch(() => null)
+      : null;
+    if (generation !== state.mediaLoadGeneration) { releaseWorkspaceApply(); return; }
+    if (launchState) {
+      activationOptions.skipLaunchState = true;
+      const explicitCustomFps = media.mediaKind !== 'video' || (launchState.fpsMode === 'custom' && launchState.fpsModeExplicit === true);
+      state.fpsMode = explicitCustomFps ? 'custom' : 'source';
+      state.fpsModeExplicit = explicitCustomFps;
+      state.fps = Number(launchState.fps) || Number(media.sourceFps || media.fps) || 24;
+      state.pendingResumePosition = state.rememberPlaybackPosition && Number.isFinite(Number(launchState.playbackPosition)) ? Math.max(0, Number(launchState.playbackPosition)) : null;
+      state.lastSavedPlaybackPosition = state.pendingResumePosition;
+      state.playbackPoster = state.rememberPlaybackPosition && typeof launchState.playbackPoster === 'string' ? launchState.playbackPoster : '';
+      state.playbackPosterDirty = false;
+      showPlaybackPoster(state.playbackPoster, generation);
+      openPlaybackAtRememberedPosition(media);
+      releaseWorkspaceApply();
+      void activationPromise;
+      return;
+    }
+    releaseWorkspaceApply();
+    const activated = await activationPromise;
     if (!activated || generation !== state.mediaLoadGeneration) return;
-    playback.setProjectFps(state.fps);
-    playback.open(media);
+    showPlaybackPoster(state.playbackPoster, generation);
+    openPlaybackAtRememberedPosition(media);
 
   }
 
   async function openVideo(file) {
     if (desktopAPI) {
+      if (typeof playback.ensureSession === 'function') void playback.ensureSession().catch(() => {});
       const probe = beginMediaProbeRequest(); state.mediaProbing = true;
       setStatus(`正在检查 · ${file?.name || '媒体'}`); $('.media-loading-indicator span').textContent = '正在检查媒体或扫描序列…';
       document.body.classList.add('media-loading'); els.viewerStage.setAttribute('aria-busy', 'true');
@@ -1293,21 +1386,65 @@
   function applyRememberedPlaybackPosition() {
     const position = Number(state.pendingResumePosition);
     state.pendingResumePosition = null;
-    if (!state.rememberPlaybackPosition || !Number.isFinite(position) || position <= 0 || !playback.duration) return;
-    const target = clamp(position, 0, Math.max(0, playback.duration - frameDuration()));
-    if (target <= frameDuration() * .5) return;
+    const target = state.rememberPlaybackPosition && Number.isFinite(position) && position > 0 && playback.duration
+      ? clamp(position, 0, Math.max(0, playback.duration - frameDuration()))
+      : null;
+    if (state.resumePositionAppliedAtOpen) {
+      state.resumePositionAppliedAtOpen = false;
+      if (Number.isFinite(target)) {
+        state.resumeSeekPending = true;
+        state.resumeTargetPosition = target;
+        if (Math.abs(playback.currentTime - target) <= Math.max(.5, frameDuration() * 6)) return;
+      }
+    }
+    if (!Number.isFinite(target) || target <= frameDuration() * .5) {
+      state.resumeSeekPending = false;
+      state.resumeTargetPosition = null;
+      return;
+    }
     state.resumeSeekPending = true;
     state.resumeTargetPosition = target;
     playback.currentTime = target;
     updatePlaybackUI(target, Math.round(target * state.fps));
   }
 
+  function openPlaybackAtRememberedPosition(media) {
+    const startTime = desktopAPI && state.rememberPlaybackPosition && Number.isFinite(Number(state.pendingResumePosition))
+      ? Math.max(0, Number(state.pendingResumePosition))
+      : 0;
+    state.resumePositionAppliedAtOpen = startTime > 0;
+    state.resumeSeekPending = startTime > 0;
+    state.resumeTargetPosition = startTime > 0 ? startTime : null;
+    state.resumeCorrectionRequested = false;
+    playback.setProjectFps(state.fps);
+    playback.open({ ...media, startTime });
+  }
+
   function acceptResumeFrame(event) {
     if (!state.resumeSeekPending) return true;
     const presentedTime = Number(event?.detail?.time ?? event?.detail?.mediaTime ?? playback.currentTime);
-    if (!Number.isFinite(presentedTime) || Math.abs(presentedTime - state.resumeTargetPosition) > Math.max(.05, frameDuration() * 1.5)) return false;
+    if (!Number.isFinite(presentedTime) || Math.abs(presentedTime - state.resumeTargetPosition) > Math.max(.5, frameDuration() * 6)) {
+      const generation = state.mediaLoadGeneration;
+      if (!state.resumeCorrectionRequested && Number.isFinite(state.resumeTargetPosition)) {
+        state.resumeCorrectionRequested = true;
+        playback.currentTime = state.resumeTargetPosition;
+      }
+      clearTimeout(state.resumePresentationTimer);
+      state.resumePresentationTimer = setTimeout(() => {
+        if (generation !== state.mediaLoadGeneration || !state.resumeSeekPending) return;
+        state.resumeSeekPending = false;
+        state.resumeTargetPosition = null;
+        state.resumeCorrectionRequested = false;
+        announceInitialMediaPresented();
+        presentLoadedMediaFrame();
+      }, 700);
+      return false;
+    }
+    clearTimeout(state.resumePresentationTimer);
+    state.resumePresentationTimer = null;
     state.resumeSeekPending = false;
     state.resumeTargetPosition = null;
+    state.resumeCorrectionRequested = false;
     return true;
   }
 
@@ -2007,7 +2144,7 @@
   }
 
   function workspaceData() {
-    return { version: '0.8', mediaKind: state.fileMeta?.mediaKind || 'video', sourceFrameOffset: state.fileMeta?.sourceFrameOffset || 0, sequence: state.fileMeta?.sequence || null, fileMeta: state.fileMeta, fps: state.fps, fpsMode: state.fpsMode, fpsModeExplicit: state.fpsModeExplicit, bookmarks: state.bookmarks, annotations: state.annotations, annotationThumbnails: state.annotationThumbnails, timelineZoom: state.timelineZoom, loopInFrame: state.loopInFrame, loopOutFrame: state.loopOutFrame, colorPreset: state.colorPreset, playbackPosition: state.rememberPlaybackPosition ? rememberedPlaybackPosition() : null, updatedAt: new Date().toISOString() };
+    return { version: '0.8', mediaKind: state.fileMeta?.mediaKind || 'video', sourceFrameOffset: state.fileMeta?.sourceFrameOffset || 0, sequence: state.fileMeta?.sequence || null, fileMeta: state.fileMeta, fps: state.fps, fpsMode: state.fpsMode, fpsModeExplicit: state.fpsModeExplicit, bookmarks: state.bookmarks, annotations: state.annotations, annotationThumbnails: state.annotationThumbnails, timelineZoom: state.timelineZoom, loopInFrame: state.loopInFrame, loopOutFrame: state.loopOutFrame, colorPreset: state.colorPreset, playbackPosition: state.rememberPlaybackPosition ? rememberedPlaybackPosition() : null, playbackPoster: state.rememberPlaybackPosition ? state.playbackPoster : '', updatedAt: new Date().toISOString() };
   }
 
   function legacyMediaKey(meta) {
@@ -2063,17 +2200,20 @@
       fpsMode: saved.fpsMode || state.fpsMode,
       fpsModeExplicit: saved.fpsModeExplicit ?? state.fpsModeExplicit,
       playbackPosition: position,
+      playbackPoster: state.playbackPoster || saved.playbackPoster || '',
       updatedAt: new Date().toISOString()
     };
   }
 
-  function persistPlaybackPositionNow() {
+  function persistPlaybackPositionNow(capturePoster = false) {
     clearTimeout(state.playbackPositionSaveTimer);
     state.playbackPositionSaveTimer = null;
-    if (!state.rememberPlaybackPosition || !state.currentMediaKey || !state.fileMeta) return;
+    if (!state.rememberPlaybackPosition || !state.currentMediaKey || !state.fileMeta || !state.currentWorkspaceReady) return;
+    if (capturePoster) capturePlaybackPoster();
     const position = rememberedPlaybackPosition();
-    if (Number.isFinite(state.lastSavedPlaybackPosition) && Math.abs(position - state.lastSavedPlaybackPosition) < .25) return;
+    if (!state.playbackPosterDirty && Number.isFinite(state.lastSavedPlaybackPosition) && Math.abs(position - state.lastSavedPlaybackPosition) < .25) return;
     state.lastSavedPlaybackPosition = position;
+    state.playbackPosterDirty = false;
     void persistMediaSnapshot(state.currentMediaKey, playbackProgressSnapshot(position))?.catch?.(() => {});
   }
 
@@ -2117,6 +2257,7 @@
     try {
       clearTimeout(state.playbackPositionSaveTimer);
       state.playbackPositionSaveTimer = null;
+      if (state.rememberPlaybackPosition) capturePlaybackPoster();
       persistPreferences();
       if (state.autosave && state.currentMediaKey) {
         state.lastSavedPlaybackPosition = rememberedPlaybackPosition();
@@ -2125,7 +2266,7 @@
     } catch { toast('本地存储空间不足，请导出工作区'); }
   }
 
-  async function activateMediaWorkspace(meta, generation = state.mediaLoadGeneration) {
+  async function activateMediaWorkspace(meta, generation = state.mediaLoadGeneration, options = {}) {
     state.currentMediaKey = mediaKey(meta);
     const key = state.currentMediaKey;
     const library = readWorkspaceLibrary();
@@ -2150,23 +2291,29 @@
         }
       }
     }
+    if (options.applyGate) await options.applyGate;
+    if (generation !== state.mediaLoadGeneration || key !== state.currentMediaKey) return false;
     if (desktopAPI) {
       desktopData.workspaces = { [key]: saved || null };
     }
-    const explicitCustomFps = meta?.mediaKind !== 'video' || (saved?.fpsMode === 'custom' && saved?.fpsModeExplicit === true);
-    state.fpsMode = explicitCustomFps ? 'custom' : 'source';
-    state.fpsModeExplicit = explicitCustomFps;
-    state.fps = state.fpsMode === 'source' ? Number(meta?.sourceFps || meta?.fps) || 24 : Number(saved?.fps) || 24;
+    if (!options.skipLaunchState) {
+      const explicitCustomFps = meta?.mediaKind !== 'video' || (saved?.fpsMode === 'custom' && saved?.fpsModeExplicit === true);
+      state.fpsMode = explicitCustomFps ? 'custom' : 'source';
+      state.fpsModeExplicit = explicitCustomFps;
+      state.fps = state.fpsMode === 'source' ? Number(meta?.sourceFps || meta?.fps) || 24 : Number(saved?.fps) || 24;
+      state.pendingResumePosition = state.rememberPlaybackPosition && Number.isFinite(Number(saved?.playbackPosition)) ? Math.max(0, Number(saved.playbackPosition)) : null;
+      state.playbackPoster = state.rememberPlaybackPosition && typeof saved?.playbackPoster === 'string' ? saved.playbackPoster : '';
+      state.playbackPosterDirty = false;
+      state.lastSavedPlaybackPosition = state.pendingResumePosition;
+      state.resumeSeekPending = false;
+      state.resumeTargetPosition = null;
+    }
     state.bookmarks = saved?.bookmarks || [];
     state.annotations = saved?.annotations || [];
     state.annotationThumbnails = saved?.annotationThumbnails && typeof saved.annotationThumbnails === 'object' ? saved.annotationThumbnails : {};
     state.timelineZoom = Number(saved?.timelineZoom) || 1;
     state.loopInFrame = Number.isFinite(saved?.loopInFrame) ? saved.loopInFrame : null;
     state.loopOutFrame = Number.isFinite(saved?.loopOutFrame) ? saved.loopOutFrame : null;
-    state.pendingResumePosition = state.rememberPlaybackPosition && Number.isFinite(Number(saved?.playbackPosition)) ? Math.max(0, Number(saved.playbackPosition)) : null;
-    state.resumeSeekPending = false;
-    state.resumeTargetPosition = null;
-    state.lastSavedPlaybackPosition = state.pendingResumePosition;
     state.colorPreset = COLOR_PRESETS[saved?.colorPreset] ? saved.colorPreset : 'original';
     els.colorCanvas.classList.toggle('active', state.colorPreset !== 'original');
     state.selectedBookmarkIds = [];
@@ -2184,10 +2331,12 @@
     renderAnnotationList();
     syncNotes();
     updateCounts();
+    state.currentWorkspaceReady = true;
     return true;
   }
 
   function saveWorkspace(manual = false) {
+    if (state.currentMediaKey && !state.currentWorkspaceReady) return;
     if (!state.autosave && !manual) {
       if (state.currentMediaKey) els.notesSaved.textContent = '未保存 · Ctrl+S';
       return;
@@ -2341,6 +2490,7 @@
 
   async function requestOpenVideo() {
     if (!desktopAPI) { els.videoInput.click(); return; }
+    if (typeof playback.ensureSession === 'function') void playback.ensureSession().catch(() => {});
     const probe = beginMediaProbeRequest();
     try {
       const media = await desktopAPI.openVideo();
@@ -2361,6 +2511,7 @@
   }
 
   async function openRecentPath(filePath) {
+    if (typeof playback.ensureSession === 'function') void playback.ensureSession().catch(() => {});
     const probe = beginMediaProbeRequest();
     try {
       const media = await desktopAPI.openRecentVideo(filePath);
@@ -3011,8 +3162,9 @@
     els.viewerStage.addEventListener('dragleave',()=>els.viewerStage.classList.remove('dragover'));
     els.viewerStage.addEventListener('drop',e=>{e.preventDefault();els.viewerStage.classList.remove('dragover');openVideo(e.dataTransfer.files[0]);});
     playback.addEventListener('loading',()=>{
-      setStatus(state.fileMeta?.mediaKind === 'sequence' ? '正在读取图片序列并解码首帧…' : '正在读取媒体信息并解码首帧…');
       $('.media-loading-indicator span').textContent = '正在解码…';
+      if (state.mediaPosterPresented) { setStatus('正在准备播放'); return; }
+      setStatus(state.fileMeta?.mediaKind === 'sequence' ? '正在读取图片序列并解码首帧…' : '正在读取媒体信息并解码首帧…');
       document.body.classList.add('media-loading');
       els.viewerStage.setAttribute('aria-busy', 'true');
     });
@@ -3024,7 +3176,7 @@
     playback.addEventListener('paused',()=>{
       els.playBtn.classList.remove('playing'); stopPlaybackUiLoop();
       if (!state.isReverse) setStatus('已暂停');
-      if (!state.mediaAwaitingMetadata) persistPlaybackPositionNow();
+      if (!state.mediaAwaitingMetadata) persistPlaybackPositionNow(true);
       revealCleanControls();
     });
     playback.addEventListener('ended',handlePlaybackEnded);
@@ -3061,7 +3213,7 @@
       state.rememberPlaybackPosition = !state.rememberPlaybackPosition;
       $('#rememberPlaybackPositionSwitch').classList.toggle('on', state.rememberPlaybackPosition);
       $('#rememberPlaybackPositionSwitch').setAttribute('aria-checked', String(state.rememberPlaybackPosition));
-      if (state.rememberPlaybackPosition) persistPlaybackPositionNow();
+      if (state.rememberPlaybackPosition) persistPlaybackPositionNow(true);
       else {
         clearTimeout(state.playbackPositionSaveTimer);
         state.playbackPositionSaveTimer = null;
@@ -3348,6 +3500,20 @@
     });
     $$('.transport details').forEach(menu=>menu.addEventListener('toggle',revealCleanControls));
     window.addEventListener('beforeunload',persistCurrentWorkspaceNow);
+    let rendererClosing = false;
+    desktopAPI?.onPrepareClose(async () => {
+      if (rendererClosing) return;
+      rendererClosing = true;
+      try {
+        persistCurrentWorkspaceNow();
+        state.contactSheetCancel = true;
+        disposeTimelinePreview();
+        try { await playback.destroy(); }
+        catch (error) { console.warn('播放器关闭清理失败：', error); }
+        try { await desktopAPI.media.destroyAll(); }
+        catch (error) { console.warn('媒体会话关闭清理失败：', error); }
+      } finally { desktopAPI.rendererCloseReady(); }
+    });
     document.addEventListener('keydown',handleShortcut);
     document.addEventListener('keydown',handleModalKeyboard,true);
   }

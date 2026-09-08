@@ -17,12 +17,17 @@ class MediaCatalog {
   constructor(cacheDirectory) { this.cacheDirectory = cacheDirectory; this.entries = new Map(); }
   async initialize() {
     await fs.mkdir(this.cacheDirectory, { recursive: true });
+    void this.cleanupStaleManifests();
+  }
+  async cleanupStaleManifests() {
     const now = Date.now();
-    for (const name of await fs.readdir(this.cacheDirectory)) {
-      if (!/^astria-sequence-[a-f0-9-]+\.txt$/.test(name)) continue;
-      const target = path.join(this.cacheDirectory, name);
-      if (now - (await fs.stat(target)).mtimeMs > 86400000) await fs.unlink(target).catch(() => {});
-    }
+    try {
+      for (const name of await fs.readdir(this.cacheDirectory)) {
+        if (!/^astria-sequence-[a-f0-9-]+\.txt$/.test(name)) continue;
+        const target = path.join(this.cacheDirectory, name);
+        if (now - (await fs.stat(target)).mtimeMs > 86400000) await fs.unlink(target).catch(() => {});
+      }
+    } catch { /* cache maintenance must not delay media opening */ }
   }
   async describe(value) {
     const resolved = await fs.realpath(localPath(value));

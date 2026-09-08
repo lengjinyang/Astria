@@ -2794,11 +2794,12 @@ body .topbar .header-media-info .media-info-top { display: flex !important; posi
   translate: -50% -50%; padding: 9px 13px; border: 1px solid rgba(255,255,255,.12); border-radius: 9px;
   background: rgba(12,15,19,.86); color: #c7ced6; font-size: 11px;
 }
-body.media-loading .media-loading-indicator { display: flex; }
+body.media-loading .media-loading-indicator { display: flex; opacity: 0; animation: media-loading-reveal 0s .18s forwards; }
 body.media-loading .viewer-empty { display: none; }
 .media-loading-indicator i { width: 13px; height: 13px; border: 2px solid rgba(255,255,255,.2); border-top-color: #d7e1ec; border-radius: 50%; animation: media-loading-spin .75s linear infinite; }
 .media-loading-indicator button { margin-left: 4px; padding: 3px 7px; border: 0; border-radius: 5px; background: rgba(255,255,255,.1); color: #d8dee5; cursor: pointer; }
 @keyframes media-loading-spin { to { rotate: 360deg; } }
+@keyframes media-loading-reveal { to { opacity: 1; } }
 .position-editor { cursor: text; border-radius: 4px; outline: none; }
 .position-editor:focus { background: rgba(255,255,255,.09); box-shadow: 0 0 0 1px rgba(190,207,225,.45); user-select: text; }
 #autosaveSwitch { border: 1px solid #343d47; padding: 2px; }

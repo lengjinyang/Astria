@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -382,10 +383,19 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
       return env.Undefined();
     }
     std::string path = info[0].As<Napi::String>().Utf8Value();
+    double start_time = 0.0;
+    if (info.Length() >= 2 && info[1].IsNumber()) {
+      start_time = info[1].As<Napi::Number>().DoubleValue();
+      if (!std::isfinite(start_time) || start_time < 0.0) {
+        Napi::RangeError::New(env, "open start time must be a finite non-negative number").ThrowAsJavaScriptException();
+        return env.Undefined();
+      }
+    }
     // Local containers go directly to libavformat content probing. Do not let
     // a local playlist redirect mpv into its network stream implementations.
-    const char* demuxer = path.rfind("mf://@", 0) == 0 ? "demuxer=mf" : "demuxer=lavf";
-    std::vector<std::string> args = {"loadfile", path, "replace", "-1", demuxer};
+    std::string options = path.rfind("mf://@", 0) == 0 ? "demuxer=mf" : "demuxer=lavf";
+    if (start_time > 0.0) options += ",start=" + std::to_string(start_time);
+    std::vector<std::string> args = {"loadfile", path, "replace", "-1", options};
     std::vector<const char*> c_args;
     c_args.reserve(args.size() + 1);
     for (const std::string& arg : args) c_args.push_back(arg.c_str());

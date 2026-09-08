@@ -52,7 +52,7 @@
       this.videoWidth = 0; this.videoHeight = 0; this.duration = 0; this.readyState = 0; this.paused = true; this.seeking = false;
       this.time = 0; this.projectFps = 24; this._volume = 1; this._muted = false; this._speed = 1; this.callbacks = new Map(); this.nextCallback = 0;
       this.generation = 0; this.disposers = []; this.session = null; this.lastFrameId = -1; this.outputRevision = 0; this.outputTarget = null;
-      this.nextOperationId = 0; this.sourceFrameRequests = new Map();
+      this.nextOperationId = 0; this.sourceFrameRequests = new Map(); this.frameStates = new Map(); this.renderedFrames = new Map();
     }
     async ensureSession() {
       if (!this.session) this.session = this.api.create().then(id => {
@@ -70,9 +70,11 @@
     fire(command, ...args) { this.call(command, ...args).catch(() => {}); }
     async open(media) {
       const generation = ++this.generation;
-      this.media = media; this.src = media.url; this.currentSrc = media.url; this.readyState = 0; this.time = 0; this.emit('loading');
+      this.media = media; this.src = media.url; this.currentSrc = media.url; this.readyState = 0; this.time = 0;
+      this.videoWidth = 0; this.videoHeight = 0; this.duration = 0; this.frameStates.clear(); this.renderedFrames.clear();
+      this.emit('loading');
       try {
-        await this.call('open', media.mediaId, this.projectFps);
+        await this.call('open', media.mediaId, this.projectFps, Number(media.startTime) || 0);
         if (generation !== this.generation) return;
         await this.call('setVolume', this._volume); await this.call('setMuted', this._muted); await this.call('setSpeed', this._speed);
       } catch { /* error is emitted by call */ }
@@ -80,16 +82,11 @@
     onState(event) {
       if (event.type === 'metadata') {
         this.backend = event.backend;
+        if (Number.isFinite(event.time)) this.time = event.time;
         this.media = event.media; this.videoWidth = event.media.width; this.videoHeight = event.media.height; this.duration = event.media.duration;
         this.readyState = 1; this.emit('metadata', event.media); this.emit('loadedmetadata');
-      } else if (event.type === 'frame') {
-        this.time = event.time; const first = this.readyState < 2; this.readyState = 4;
-        if (first) this.emit('loadeddata');
-        this.emit('timeupdate'); this.emit('frame', event);
-        if (event.seeked) { this.seeking = false; this.emit('seeked'); }
-        const callbacks = [...this.callbacks.values()]; this.callbacks.clear();
-        for (const callback of callbacks) callback(performance.now(), { mediaTime: this.time });
-      } else if (event.type === 'playing' && this.stepping) {
+      } else if (event.type === 'frame') this.queueFrameState(event);
+      else if (event.type === 'playing' && this.stepping) {
         // libmpv briefly unpauses internally to present a frame-step. Keep the
         // public paused state stable until the user explicitly starts playback.
         return;
@@ -97,6 +94,31 @@
         this.paused = event.type === 'paused'; this.emit(event.type); this.emit(this.paused ? 'pause' : 'play');
       } else if (event.type === 'error') this.fail(new Error(event.message));
       else this.emit(event.type, event);
+    }
+    pruneFramePairs(map) {
+      while (map.size > 12) map.delete(map.keys().next().value);
+    }
+    queueFrameState(event) {
+      if (!Number.isSafeInteger(event.frameId)) { this.commitPresentedFrame(event); return; }
+      this.frameStates.set(event.frameId, event); this.pruneFramePairs(this.frameStates); this.commitFramePair(event.frameId);
+    }
+    markFrameRendered(frame) {
+      if (!Number.isSafeInteger(frame.frameId)) return;
+      this.renderedFrames.set(frame.frameId, frame); this.pruneFramePairs(this.renderedFrames); this.commitFramePair(frame.frameId);
+    }
+    commitFramePair(frameId) {
+      const state = this.frameStates.get(frameId), rendered = this.renderedFrames.get(frameId);
+      if (!state || !rendered) return;
+      this.frameStates.delete(frameId); this.renderedFrames.delete(frameId);
+      this.commitPresentedFrame({ ...rendered, ...state });
+    }
+    commitPresentedFrame(event) {
+      this.time = event.time; const first = this.readyState < 2; this.readyState = 4;
+      if (first) this.emit('loadeddata');
+      this.emit('timeupdate'); this.emit('frame', event);
+      if (event.seeked) { this.seeking = false; this.emit('seeked'); }
+      const callbacks = [...this.callbacks.values()]; this.callbacks.clear();
+      for (const callback of callbacks) callback(performance.now(), { mediaTime: this.time });
     }
     resize(width, height) { if (this.surface.width !== width || this.surface.height !== height) { this.surface.width = width; this.surface.height = height; } }
     acceptFrame(frame) {
@@ -128,6 +150,7 @@
       if (this.finishSourceFrame(metadata, frame)) return;
       this.resize(frame.displayWidth, frame.displayHeight);
       this.presenter.draw(frame);
+      this.markFrameRendered(metadata);
     }
     drawSoftware(frame) {
       if (!this.acceptFrame(frame)) return;
@@ -137,6 +160,7 @@
       this.upload.draw(frame);
       if (this.finishSourceFrame(frame, this.upload.canvas)) return;
       this.presenter.draw(this.upload.canvas);
+      this.markFrameRendered(frame);
     }
     play() { this.stopReverse(); this.stepping = false; return this.call('play'); }
     pause() { this.stopReverse(); if (this.session) this.fire('pause'); }
@@ -188,10 +212,15 @@
       return this.requestSourceFrame('capture');
     }
     async destroy() {
-      this.stopReverse(); for (const dispose of this.disposers) dispose(); this.callbacks.clear();
-      for (const pending of this.sourceFrameRequests.values()) { clearTimeout(pending.timer); pending.reject(new Error('播放器已关闭')); }
-      this.sourceFrameRequests.clear();
-      if (this.session) await this.api.destroy(await this.session); this.upload?.destroy(); this.presenter.destroy();
+      if (this.destroyPromise) return this.destroyPromise;
+      this.destroyPromise = (async () => {
+        this.stopReverse(); for (const dispose of this.disposers.splice(0)) dispose(); this.callbacks.clear();
+        for (const pending of this.sourceFrameRequests.values()) { clearTimeout(pending.timer); pending.reject(new Error('播放器已关闭')); }
+        this.sourceFrameRequests.clear(); this.frameStates.clear(); this.renderedFrames.clear();
+        if (this.session) await this.api.destroy(await this.session);
+        this.upload?.destroy(); this.presenter.destroy();
+      })();
+      return this.destroyPromise;
     }
   }
   class FrameSurfaceRenderer {

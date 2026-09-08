@@ -43,6 +43,7 @@ let initialMediaPresented = false;
 let initialShowFallback = null;
 let manualWindowResize = null;
 let mediaProbeSerial = 0;
+let rendererCloseReadyHandler = null;
 const isSmokeTest = process.argv.includes('--smoke-test');
 if (isSmokeTest) app.setPath('userData', path.resolve('.cache/desktop-smoke-profile'));
 
@@ -77,6 +78,11 @@ class DesktopStore {
   workspacePath(key) {
     const digest = createHash('sha256').update(String(key)).digest('hex');
     return path.join(this.workspaceDirectory, `${digest}.json`);
+  }
+
+  launchStatePath(key) {
+    const digest = createHash('sha256').update(String(key)).digest('hex');
+    return path.join(this.workspaceDirectory, `${digest}-launch.json`);
   }
 
   thumbnailDirectory(key) {
@@ -125,6 +131,7 @@ class DesktopStore {
     };
     for (const bookmark of copy.bookmarks || []) bookmark.thumbnail = await storeThumbnail(bookmark.thumbnail, `bookmark-${bookmark.id || bookmark.frame}`);
     for (const [frame, value] of Object.entries(copy.annotationThumbnails || {})) copy.annotationThumbnails[frame] = await storeThumbnail(value, `annotation-${frame}`);
+    copy.playbackPoster = await storeThumbnail(copy.playbackPoster, 'playback-poster');
     return { workspace: copy, used };
   }
 
@@ -147,6 +154,7 @@ class DesktopStore {
     };
     for (const bookmark of copy.bookmarks || []) bookmark.thumbnail = resolve(bookmark.thumbnail);
     for (const [frame, value] of Object.entries(copy.annotationThumbnails || {})) copy.annotationThumbnails[frame] = resolve(value);
+    copy.playbackPoster = resolve(copy.playbackPoster);
     return copy;
   }
 
@@ -165,6 +173,7 @@ class DesktopStore {
     };
     for (const bookmark of copy.bookmarks || []) bookmark.thumbnail = await inline(bookmark.thumbnail);
     for (const [frame, value] of Object.entries(copy.annotationThumbnails || {})) copy.annotationThumbnails[frame] = await inline(value);
+    copy.playbackPoster = await inline(copy.playbackPoster);
     return copy;
   }
 
@@ -204,6 +213,14 @@ class DesktopStore {
     } catch { return null; }
   }
 
+  async loadLaunchState(key) {
+    if (typeof key !== 'string' || !key || key.length > 2048) return null;
+    try {
+      const saved = JSON.parse(await fsp.readFile(this.launchStatePath(key), 'utf8'));
+      return saved?.key === key && saved.state && typeof saved.state === 'object' ? this.resolveThumbnails(key, saved.state) : null;
+    } catch { return null; }
+  }
+
   saveWorkspace(key, workspace) {
     if (typeof key !== 'string' || !key || key.length > 2048 || !workspace || typeof workspace !== 'object') return false;
     let snapshot;
@@ -232,6 +249,16 @@ class DesktopStore {
               if (Buffer.byteLength(payload, 'utf8') <= 64 * 1024 * 1024) {
                 const written = await this.scheduleWrite(target, payload);
                 if (written) {
+                  const launchState = {
+                    playbackPosition: Number.isFinite(Number(compact.workspace.playbackPosition)) ? Math.max(0, Number(compact.workspace.playbackPosition)) : 0,
+                    playbackPoster: compact.workspace.playbackPoster || '',
+                    fps: Number(compact.workspace.fps) || 24,
+                    fpsMode: compact.workspace.fpsMode === 'custom' ? 'custom' : 'source',
+                    fpsModeExplicit: compact.workspace.fpsModeExplicit === true,
+                    mediaKind: compact.workspace.mediaKind || 'video',
+                    sourceFrameOffset: Number(compact.workspace.sourceFrameOffset) || 0
+                  };
+                  await this.scheduleWrite(this.launchStatePath(key), JSON.stringify({ key, state: launchState }));
                   entry.lastUsed = compact.used;
                   entry.hasPersisted = true;
                   saved = true;
@@ -258,6 +285,7 @@ class DesktopStore {
     const pending = this.workspaceSaves.get(target)?.running;
     if (pending) await pending.catch(() => {});
     await fsp.unlink(target).catch(() => {});
+    await fsp.unlink(this.launchStatePath(key)).catch(() => {});
     await fsp.rm(this.thumbnailDirectory(key), { recursive: true, force: true }).catch(() => {});
     return true;
   }
@@ -566,6 +594,30 @@ function createWindow() {
   }
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', event => event.preventDefault());
+  const closingWindow = mainWindow;
+  let closeApproved = false;
+  let closeRequested = false;
+  let closeFallback = null;
+  const finishWindowClose = () => {
+    if (closeApproved) return;
+    closeApproved = true;
+    clearTimeout(closeFallback);
+    closeFallback = null;
+    if (!closingWindow.isDestroyed()) closingWindow.close();
+  };
+  const closeReadyHandler = sender => {
+    if (sender === closingWindow.webContents) finishWindowClose();
+  };
+  rendererCloseReadyHandler = closeReadyHandler;
+  closingWindow.on('close', event => {
+    if (closeApproved) return;
+    event.preventDefault();
+    if (closeRequested) return;
+    closeRequested = true;
+    closeFallback = setTimeout(finishWindowClose, 3000);
+    try { closingWindow.webContents.send('vfx:prepare-close'); }
+    catch { finishWindowClose(); }
+  });
   // Native drag regions do not deliver DOM pointer moves. This only reports
   // hover for the auto-hidden toolbar; Windows owns all movement and sizing.
   const titlebarWindow = mainWindow;
@@ -595,6 +647,8 @@ function createWindow() {
   }, 80);
   mainWindow.on('closed', () => {
     manualWindowResize = null;
+    if (rendererCloseReadyHandler === closeReadyHandler) rendererCloseReadyHandler = null;
+    clearTimeout(closeFallback);
     clearInterval(titlebarHoverTimer);
     clearTimeout(windowInteractionTimer);
     if (initialShowFallback) clearTimeout(initialShowFallback);
@@ -617,6 +671,10 @@ function registerIpc() {
   ipcMain.handle('vfx:load-media-workspace', (event, key) => {
     if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('访问被拒绝');
     return store.loadWorkspace(key);
+  });
+  ipcMain.handle('vfx:load-media-launch-state', (event, key) => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('访问被拒绝');
+    return store.loadLaunchState(key);
   });
   ipcMain.on('vfx:save-preferences', (event, preferences) => {
     if (event.sender === mainWindow?.webContents && event.senderFrame === mainWindow.webContents.mainFrame) store.updatePreferences(preferences);
@@ -693,6 +751,7 @@ function registerIpc() {
     if (event.sender === mainWindow?.webContents) manualWindowResize = null;
   });
   ipcMain.handle('vfx:window-close', () => { mainWindow?.close(); return true; });
+  ipcMain.on('vfx:renderer-close-ready', event => rendererCloseReadyHandler?.(event.sender));
   ipcMain.handle('vfx:toggle-fullscreen', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return getWindowState();
     mainWindow.setFullScreen(!mainWindow.isFullScreen());

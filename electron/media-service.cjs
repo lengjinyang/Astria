@@ -35,7 +35,7 @@ class MediaService {
         this.sessions.set(session.id, session);
         return session.id;
       },
-      open: (event, id, mediaId, fps) => this.session(event, id).open(mediaId, number(fps, 1, 240)),
+      open: (event, id, mediaId, fps, startTime = 0) => this.session(event, id).open(mediaId, number(fps, 1, 240), number(startTime, 0, 1e10)),
       play: (event, id) => this.session(event, id).player.play(),
       pause: (event, id) => this.session(event, id).player.pause(),
       stop: (event, id) => this.session(event, id).player.stop(),
@@ -47,7 +47,12 @@ class MediaService {
       setOutputTarget: (event, id, target) => this.session(event, id).setOutputTarget(target),
       requestSourceFrame: (event, id, request) => this.session(event, id).requestSourceFrame(request),
       captureFrame: (event, id) => this.session(event, id).captureFrame(),
-      destroy: async (event, id) => { await this.session(event, id).destroy(); this.sessions.delete(id); }
+      destroy: async (event, id) => { await this.session(event, id).destroy(); this.sessions.delete(id); },
+      destroyAll: async event => {
+        const owned = [...this.sessions.values()].filter(session => session.owner === event.sender);
+        await Promise.all(owned.map(session => session.destroy()));
+        for (const session of owned) this.sessions.delete(session.id);
+      }
     };
     for (const [command, handler] of Object.entries(handlers)) {
       ipcMain.handle(`media:${command}`, (event, ...args) => {
@@ -77,7 +82,7 @@ class Session {
     this.id = randomUUID(); this.core = core; this.owner = owner; this.catalog = catalog;
     this.mode = sharedTexture && process.env.ASTRIA_RENDER_BACKEND !== 'software' ? 'shared-texture' : 'software'; this.closed = false; this.pending = false;
     this.outputTarget = { width: 0, height: 0, mode: 'source', revision: 0 };
-    this.exactFrames = []; this.frameId = 0; this.inFlight = 0; this.releases = new Set(); this.windowInteraction = false; this.lockedOutputTarget = null;
+    this.exactFrames = []; this.frameId = 0; this.inFlight = 0; this.releases = new Set(); this.windowInteraction = false; this.lockedOutputTarget = null; this.framePresentable = false;
     try { this.player = new core.MpvPlayer({ mode: this.mode }); }
     catch (error) {
       if (this.mode !== 'shared-texture') throw error;
@@ -96,7 +101,7 @@ class Session {
     this.events();
   }
   send(type, data = {}) { if (!this.closed && !this.owner.isDestroyed()) this.owner.send('media:state', { id: this.id, type, ...data }); }
-  async open(mediaId, fps) {
+  async open(mediaId, fps, startTime = 0) {
     const generation = this.generation = (this.generation || 0) + 1;
     if (this.mediaId && this.mediaId !== mediaId) await this.catalog.release(this.mediaId, this.id);
     this.mediaId = mediaId;
@@ -110,8 +115,8 @@ class Session {
       if (this.mediaId !== mediaId) await this.catalog.release(mediaId, this.id);
       return;
     }
-    this.descriptor = entry.descriptor; this.source = entry.source; this.loaded = false;
-    this.send('loading'); this.player.pause(); this.player.setFps(fps); this.loadId = this.player.open(this.source);
+    this.descriptor = entry.descriptor; this.source = entry.source; this.loaded = false; this.framePresentable = false; this.startTime = startTime;
+    this.send('loading'); this.player.pause(); this.player.setFps(fps); this.loadId = this.player.open(this.source, startTime);
     return this.descriptor;
   }
   events() {
@@ -121,6 +126,7 @@ class Session {
       if (event.error) { this.send('error', { message: `无法解复用或解码此媒体（容器/编码不受支持或文件损坏）：${event.error}` }); continue; }
       if (event.type === 'file-loaded') {
         const info = this.player.getInfo(); this.loaded = true;
+        this.time = Number.isFinite(info['time-pos']) ? info['time-pos'] : this.startTime;
         Object.assign(this.descriptor, { width: info.width || 0, height: info.height || 0,
           duration: this.descriptor.mediaKind === 'sequence' ? this.descriptor.duration : info.duration || 0,
           codec: info['video-codec'], container: info['file-format'], hardwareDecoder: info['hwdec-current'] || 'none' });
@@ -129,7 +135,7 @@ class Session {
           this.descriptor.fps = this.descriptor.sourceFps;
           this.descriptor.totalFrames = Math.max(1, Math.round(this.descriptor.duration * this.descriptor.sourceFps));
         }
-        if (this.descriptor.width && this.descriptor.height) this.send('metadata', { media: this.descriptor, backend: this.mode });
+        if (this.descriptor.width && this.descriptor.height) this.send('metadata', { media: this.descriptor, backend: this.mode, time: this.time });
         this.queueFrame();
         if (this.restore) {
           const restore = this.restore; this.restore = null;
@@ -160,6 +166,7 @@ class Session {
         if (event.name === 'eof-reached' && event.data) this.send('ended');
       }
       if (event.type === 'playback-restart') {
+        this.framePresentable = true;
         const hardwareDecoder = this.player.getInfo()['hwdec-current'] || 'none';
         if (this.descriptor.hardwareDecoder !== hardwareDecoder) {
           this.descriptor.hardwareDecoder = hardwareDecoder;
@@ -229,6 +236,7 @@ class Session {
       const request = this.exactFrames.length ? this.exactFrames.shift() : null;
       if (!request) this.pending = false;
       const { width, height, mode, revision } = this.outputDimensions(request);
+      const presentable = this.framePresentable;
       if (!width || !height) return;
       try {
         const metadata = {
@@ -281,7 +289,7 @@ class Session {
           const frame = this.player.renderFrame(width, height);
           this.owner.send('media:frame', { ...metadata, ...frame });
         }
-        if (request?.purpose !== 'capture' && metadata.outputRevision >= this.outputTarget.revision) {
+        if (presentable && request?.purpose !== 'capture' && metadata.outputRevision >= this.outputTarget.revision) {
           this.send('frame', { ...metadata, time: metadata.mediaTime, seeked: !!this.seeked });
           this.seeked = false;
         }
@@ -307,15 +315,18 @@ class Session {
     if (this.mode !== 'software') return { currentCanvas: true, width: this.descriptor.width, height: this.descriptor.height };
     return this.player.renderFrame(this.descriptor.width, this.descriptor.height);
   }
-  async destroy() {
-    if (this.closed) return;
-    this.closed = true; this.player.setEventCallback(); this.player.setUpdateCallback();
-    const error = new Error('媒体会话已关闭');
-    for (const request of this.exactFrames.splice(0)) request.reject(error);
-    if (this.pumping) await this.pumping;
-    if (this.releases.size) await Promise.all([...this.releases]);
-    this.player.destroy();
-    if (this.mediaId) await this.catalog.release(this.mediaId, this.id);
+  destroy() {
+    if (this.destroyPromise) return this.destroyPromise;
+    this.destroyPromise = (async () => {
+      this.closed = true; this.player.setEventCallback(); this.player.setUpdateCallback();
+      const error = new Error('媒体会话已关闭');
+      for (const request of this.exactFrames.splice(0)) request.reject(error);
+      if (this.pumping) await this.pumping.catch(() => {});
+      if (this.releases.size) await Promise.allSettled([...this.releases]);
+      this.player.destroy();
+      if (this.mediaId) await this.catalog.release(this.mediaId, this.id);
+    })();
+    return this.destroyPromise;
   }
 }
 module.exports = { MediaService, runtimePath, loadCore };
