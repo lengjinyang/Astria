@@ -54,7 +54,7 @@ class MediaService {
       play: (event, id) => this.session(event, id).player.play(),
       pause: (event, id) => this.session(event, id).player.pause(),
       stop: (event, id) => this.session(event, id).player.stop(),
-      seek: (event, id, seconds) => this.session(event, id).player.seek(number(seconds, 0, 1e10)),
+      seek: (event, id, seconds, mediaId) => this.session(event, id).seek(number(seconds, 0, 1e10), mediaId),
       step: (event, id, direction) => { if (direction !== -1 && direction !== 1) throw new Error('无效逐帧方向'); const session = this.session(event, id); session.stepPending = true; session.player.step(direction); },
       setSpeed: (event, id, speed) => this.session(event, id).player.setSpeed(number(speed, 0.01, 100)),
       setVolume: (event, id, volume) => this.session(event, id).player.setVolume(number(volume, 0, 1) * 100),
@@ -120,7 +120,9 @@ class Session {
   async open(mediaId, fps, startTime = 0) {
     startupTrace.mark('media.open');
     const generation = this.generation = (this.generation || 0) + 1;
+    this.loaded = false; this.framePresentable = false; this.pendingSeek = null;
     if (this.mediaId && this.mediaId !== mediaId) await this.catalog.release(this.mediaId, this.id);
+    if (this.closed || generation !== this.generation) return;
     this.mediaId = mediaId;
     let entry;
     try { entry = await this.catalog.source(mediaId, fps, this.id); }
@@ -135,6 +137,11 @@ class Session {
     this.descriptor = entry.descriptor; this.source = entry.source; this.loaded = false; this.framePresentable = false; this.startTime = startTime;
     this.send('loading'); this.player.pause(); this.player.setFps(fps); this.loadId = this.player.open(this.source, startTime);
     return this.descriptor;
+  }
+  seek(seconds, mediaId) {
+    if (this.closed || (mediaId && mediaId !== this.mediaId)) return;
+    if (!this.loaded) { this.pendingSeek = { seconds, generation: this.generation }; return; }
+    this.player.seek(seconds);
   }
   events() {
     if (this.closed) return;
@@ -154,6 +161,10 @@ class Session {
           this.descriptor.totalFrames = Math.max(1, Math.round(this.descriptor.duration * this.descriptor.sourceFps));
         }
         if (this.descriptor.width && this.descriptor.height) this.send('metadata', { media: this.descriptor, backend: this.mode, time: this.time });
+        if (this.pendingSeek) {
+          const pending = this.pendingSeek; this.pendingSeek = null;
+          if (pending.generation === this.generation) this.seek(pending.seconds, this.mediaId);
+        }
         this.queueFrame();
         if (this.restore) {
           const restore = this.restore; this.restore = null;

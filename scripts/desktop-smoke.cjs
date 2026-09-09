@@ -13,6 +13,20 @@ module.exports = async function smoke(window, catalog, app) {
   await window.webContents.executeJavaScript(`(() => { const select=document.querySelector('#startupModeSelect');select.value='classic';select.dispatchEvent(new Event('change',{bubbles:true})); })()`);
   window.webContents.send('vfx:open-video-from-system', descriptor);
   if (descriptor.mediaKind === 'sequence') return require('./sequence-smoke.cjs')(window,catalog,app,descriptor);
+  if(process.env.ASTRIA_COLOR_AUDIT) {
+    await window.webContents.executeJavaScript(`new Promise(resolve=>{const tick=()=>window.__astriaPlayback.readyState>=2?resolve():setTimeout(tick,20);tick()})`);
+    await window.webContents.executeJavaScript(`window.__astriaPlayback.pause();const c=document.getElementById("colorPresetSelect");c.value="original";c.dispatchEvent(new Event("change"));`);
+    let baselinePixel;
+    for(const mode of [false,true,false,true]) {
+      await window.webContents.executeJavaScript(`if(document.body.classList.contains('clean-mode')!==${mode})document.getElementById(${mode}?'cleanModeBtn':'cleanModeExitBtn').click()`);
+      await new Promise(r=>setTimeout(r,500));
+      const shot=await window.webContents.capturePage();const size=shot.getSize();
+      const pixel=shot.crop({x:Math.floor(size.width/3),y:Math.floor(size.height/3),width:1,height:1}).toBitmap();
+      baselinePixel ||= [...pixel];
+      if([...pixel].some((value,index)=>Math.abs(value-baselinePixel[index])>2))throw Error('Mode changed displayed color '+JSON.stringify({mode,pixel:[...pixel],baselinePixel}));
+      console.log('MODE_COLOR_PASS',mode,[...pixel]);
+    }
+  }
   const result = await window.webContents.executeJavaScript(`(async () => {
     const p = window.__astriaPlayback;
     const wait = (condition, timeout=12000) => new Promise((resolve,reject) => {
@@ -31,8 +45,24 @@ module.exports = async function smoke(window, catalog, app) {
     p.playbackRate=1.5; p.volume=.4; p.muted=true;
     await p.play(); await wait(()=>!p.paused); p.pause(); await wait(()=>p.paused);
     const frame=await p.captureFrame();
+    if(p.presenter?.gl?.getContextAttributes().desynchronized)throw Error('Video canvas bypasses synchronized composition');
     const click=id=>document.getElementById(id).click();
     if(document.body.classList.contains('clean-mode'))click('cleanModeBtn');
+    for(let iteration=0;iteration<3;iteration++) {
+      click('cleanModeBtn');
+      if(!document.querySelector('.mode-presentation-canvas.visible'))throw Error('Mode transition has no retained frame');
+      await new Promise(resolve=>setTimeout(resolve,80));
+      if(!document.body.classList.contains('clean-mode') || p.readyState<2)throw Error('Clean mode lost presentation');
+      const windowState = await window.desktopAPI.getWindowState();
+      if(!windowState.maximized && !windowState.fullscreen) {
+        const picture=document.querySelector('#mediaSurface').getBoundingClientRect();
+        const viewer=document.querySelector('#viewerStage').getBoundingClientRect();
+        if(Math.abs(picture.width-viewer.width)>2 || Math.abs(picture.height-viewer.height)>2)throw Error('Clean mode did not fit picture');
+      }
+      await wait(()=>!document.querySelector('.mode-presentation-canvas.visible'));
+      click('cleanModeExitBtn');
+      await new Promise(resolve=>setTimeout(resolve,80));
+    }
     const color=document.getElementById('colorPresetSelect'); color.value='unity-neutral';color.dispatchEvent(new Event('change',{bubbles:true}));
     await new Promise(resolve=>setTimeout(resolve,250));
     click('lumaBtn'); click('lumaBtn'); click('addBookmarkBtn');
@@ -40,6 +70,7 @@ module.exports = async function smoke(window, catalog, app) {
     click('pixelInspectorBtn');
     const stage=document.querySelector('#viewerStage'),rect=stage.getBoundingClientRect();
     stage.dispatchEvent(new PointerEvent('pointermove',{clientX:rect.x+rect.width/2,clientY:rect.y+rect.height/2,bubbles:true}));
+    await wait(()=>document.querySelector('#pixelInspectorHud').classList.contains('show'));
     const pixel=document.querySelector('#pixelInspectorHud').classList.contains('show');
     click('exportAnnotatedFrameBtn');click('contactSheetBtn');click('generateContactSheetBtn');
     await wait(()=>!document.querySelector('#generateContactSheetBtn').disabled,15000);

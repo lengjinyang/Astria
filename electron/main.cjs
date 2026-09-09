@@ -61,7 +61,6 @@ function revealMainWindow() {
   initialShowFallback = null;
   if (initialRevealPending || mainWindow.isVisible()) return;
   const window = mainWindow;
-  if (!deferInitialWindowShow) { window.show(); return; }
   initialRevealPending = true;
   // Present a real visible compositor surface at zero native opacity. This
   // avoids capturePage's GPU readback and never exposes an opaque blank body.
@@ -597,8 +596,6 @@ function createWindow() {
   startupTrace.mark('window.created');
   mainWindow.once('show', () => {
     startupTrace.mark('window.shown');
-    if (!deferInitialWindowShow) startupTrace.mark('window.full-opacity');
-    if (!deferInitialWindowShow && !mainWindow?.isDestroyed()) mainWindow.webContents.send('vfx:initial-window-shown');
   });
 
   const windowQuery = {};
@@ -627,9 +624,8 @@ function createWindow() {
     // File launches are released by a complete playback layout (or an explicit
     // load error). A timer must not expose the poster-only intermediate layout.
     if (!deferInitialWindowShow) initialShowFallback = setTimeout(() => {
-      rendererUiReady = true;
-      revealMainWindow();
-    }, 1400);
+      if (!rendererUiReady) reportStartupFailure('界面初始化超时，未能显示启动页面。');
+    }, 30000);
     revealMainWindow();
   });
   mainWindow.webContents.once('did-finish-load', broadcastWindowState);
@@ -695,6 +691,9 @@ function createWindow() {
     event.preventDefault();
     if (closeRequested) return;
     closeRequested = true;
+    // Acknowledge closing immediately; retain the renderer until saving and
+    // media teardown finish instead of leaving a frozen window on screen.
+    closingWindow.hide();
     closeFallback = setTimeout(finishWindowClose, 3000);
     try { closingWindow.webContents.send('vfx:prepare-close'); }
     catch { finishWindowClose(); }
@@ -706,7 +705,9 @@ function createWindow() {
   let windowWasInside = null;
   const titlebarHoverTimer = setInterval(() => {
     if (titlebarWindow.isDestroyed() || windowInteractionActive) return;
-    if (!titlebarWindow.isVisible() || titlebarWindow.isMinimized() || !titlebarWindow.isFocused()) {
+    // Hover must also work before the user activates this window. Do not
+    // confuse keyboard focus with the pointer leaving the player.
+    if (!titlebarWindow.isVisible() || titlebarWindow.isMinimized()) {
       if (windowWasInside) titlebarWindow.webContents.send('vfx:window-pointer', { inside: false });
       windowWasInside = false; titlebarWasInside = false;
       return;
@@ -750,6 +751,15 @@ function registerIpc() {
   ipcMain.handle('vfx:describe-dropped-file', async (event, filePath) => {
     if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('访问被拒绝');
     const media = await describeVideo(filePath); await registerRecent(media); return media;
+  });
+  ipcMain.handle('vfx:browse-directory', async (event, directory) => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('访问被拒绝');
+    return require('./video-browser.cjs').readDirectory(directory === null ? app.getPath('videos') : directory);
+  });
+  ipcMain.handle('vfx:choose-directory', async event => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('访问被拒绝');
+    const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
+    return result.canceled ? null : result.filePaths[0];
   });
   ipcMain.handle('vfx:open-video', openVideoDialog);
   ipcMain.handle('vfx:open-recent-video', (_event, filePath) => openRecentVideo(filePath));

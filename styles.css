@@ -598,8 +598,7 @@ body:not(.media-ready) .viewer-stage {
 .clean-mode .topbar,
 .clean-mode .analysis-panel,
 .clean-mode #annotationCanvas,
-.clean-mode .pixel-inspector-hud,
-.clean-mode .toast-stack { display: none !important; }
+.clean-mode .pixel-inspector-hud { display: none !important; }
 .clean-mode .workspace { min-height: 0; display: block; background: #000; }
 .clean-mode .viewer-column { position: relative; width: 100%; height: 100%; display: grid; grid-template-areas: "viewer"; grid-template-rows: minmax(0, 1fr); background: #000; }
 .clean-mode .viewer-stage { width: 100%; height: 100%; min-height: 0; background: #000; cursor: default; }
@@ -611,7 +610,7 @@ body:not(.media-ready) .viewer-stage {
 .desktop-runtime.clean-mode:not(.window-fullscreen) .clean-drag-region {
   display: block;
   position: absolute;
-  inset: 0 128px auto 0;
+  inset: 0 164px auto 0;
   height: 44px;
   z-index: 29;
   -webkit-app-region: drag;
@@ -619,7 +618,7 @@ body:not(.media-ready) .viewer-stage {
 }
 .desktop-runtime.clean-mode .clean-window-controls {
   position: absolute;
-  top: 10px;
+  top: 4px;
   right: 10px;
   z-index: 30;
   height: 32px;
@@ -2359,10 +2358,15 @@ body.media-ready.clean-mode .bottom-dock .timeline-panel {
 body.media-ready.clean-mode .bottom-dock .timeline-track-wrap { padding: 0 6px; height: 24px; }
 body.media-ready.clean-mode .bottom-dock .timeline-track { margin-top: 11px; height: 3px; background: rgba(255,255,255,.2); }
 body.media-ready.clean-mode .bottom-dock .timeline-progress { background: #bcbcbc; }
+body.media-ready.clean-mode .bottom-dock :is(.timeline-marker, .annotation-timeline-marker) {
+  top: 50%; bottom: auto; translate: -50% -50%;
+}
 body.media-ready.clean-mode .bottom-dock .playhead { background: #ededed; }
+body.media-ready.clean-mode .transport #fullscreenBtn,
 body.media-ready.clean-mode .transport-right > .transport-btn,
 body.media-ready.clean-mode .transport-right > details > summary { color: #dedede; }
 body.media-ready.clean-mode .transport :is(#playBtn,#stepBackBtn,#stepForwardBtn,#cleanMuteBtn):hover,
+body.media-ready.clean-mode .transport #fullscreenBtn:hover,
 body.media-ready.clean-mode .transport-right > .transport-btn:hover,
 body.media-ready.clean-mode .transport-right > details > summary:hover {
   color: #fff; background: rgba(255,255,255,.09);
@@ -2875,3 +2879,166 @@ body.media-ready:not(.clean-mode).classic-topbar-visible .topbar {
 .annotation-radial-menu :is(button,input):disabled { opacity: .35; cursor: default; }
 .annotation-radial-menu[data-tool="select"] .annotation-color-row,.annotation-radial-menu[data-tool="eraser"] .annotation-color-row { opacity: .45; pointer-events: none; }
 .annotation-radial-menu :is(button,input):focus-visible,.annotation-color-row .radial-color:focus-within { outline: 2px solid #bbb; outline-offset: 1px; }
+
+.resource-browser { position: fixed; z-index: 65; left: 12px; top: 64px; bottom: 100px; width: min(320px,calc(100vw - 24px)); min-height: 180px; display: flex; flex-direction: column; padding: 9px; gap: 7px; border: 1px solid var(--chrome-line); border-radius: 10px; background: var(--chrome-popover); backdrop-filter: blur(28px); color: var(--text); box-shadow: 0 10px 28px #0004; }
+.resource-browser[hidden] { display: none; }
+.resource-browser header,.resource-browser nav,.resource-filter { display: flex; align-items: center; gap: 4px; }
+.resource-browser header strong { flex: 1; font-size: 12px; font-weight: 500; }
+.resource-browser button { border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); min-height: 28px; padding: 3px 7px; font: inherit; font-size: 11px; cursor: pointer; }
+.resource-browser button:hover { background: var(--chrome-hover); color: var(--text); }
+.resource-browser button:disabled { opacity: .35; cursor: default; }
+.resource-browser input { min-width: 0; width: 100%; height: 29px; border: 1px solid var(--chrome-line); border-radius: 5px; padding: 4px 7px; background: rgba(255,255,255,.035); color: var(--text); font: inherit; font-size: 11px; }
+.resource-filter input { flex: 1; }
+.resource-filter button { white-space: nowrap; }
+#resourceList { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; }
+.resource-browser .resource-entry { width: 100%; height: 36px; display: flex; gap: 8px; align-items: center; text-align: left; }
+.resource-entry span:first-child { flex: 0 0 17px; font-size: 16px; }
+.resource-entry-icon { font-size: 16px !important; color: var(--muted); }
+.resource-entry span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resource-browser .resource-entry.selected { background: rgba(255,255,255,.09); border-color: rgba(255,255,255,.12); }
+.resource-browser .resource-entry.playing { color: var(--text); }
+.resource-browser footer { font-size: 11px; line-height: 1.5; color: var(--muted); border-top: 1px solid var(--chrome-line); padding-top: 6px; }
+.resource-browser :is(button,input):focus-visible { outline: 1px solid #aaa; outline-offset: -1px; }
+
+.resource-playback { display: flex; justify-content: flex-end; gap: 4px; }
+
+.resource-browser { width: min(520px,calc(100vw - 24px)); }
+.resource-columns { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0,var(--folder-share,38%)) 7px minmax(0,1fr); gap: 0; }
+.resource-folders,.resource-videos { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.resource-folders { padding-right: 6px; }
+.resource-columns section > small { color: var(--muted); font-size: 10px; padding: 2px 6px 6px; }
+#resourceTree { flex: 1; overflow: auto; min-height: 0; }
+.resource-tree-row { display: flex; align-items: center; min-height: 30px; width: max-content; min-width: 100%; }
+.resource-tree-row > button:first-child { flex: 0 0 24px; width: 24px; padding: 0; }
+.resource-tree-label { text-align: left; white-space: nowrap; flex: 1 0 auto; }
+.resource-tree-label.selected { background: rgba(255,255,255,.09); color: var(--text); }
+
+#resourceDivider { position: relative; cursor: col-resize; touch-action: none; user-select: none; border-radius: 3px; }
+#resourceDivider::after { content: ''; position: absolute; top: 0; bottom: 0; left: 3px; width: 1px; background: var(--chrome-line); pointer-events: none; }
+#resourceDivider:hover,#resourceDivider:focus-visible,.resource-columns.resizing #resourceDivider { background: rgba(255,255,255,.08); outline: none; }
+#resourceDivider:hover::after,#resourceDivider:focus-visible::after,.resource-columns.resizing #resourceDivider::after { background: rgba(255,255,255,.35); }
+.resource-columns.resizing,.resource-columns.resizing * { cursor: col-resize !important; user-select: none; }
+#resourceTree { scrollbar-gutter: stable; }
+.resource-browser :is(#resourceTree,#resourceList) {
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+.resource-browser :is(#resourceTree,#resourceList)::-webkit-scrollbar { width: 8px; height: 8px; }
+.resource-browser :is(#resourceTree,#resourceList)::-webkit-scrollbar-track,
+.resource-browser :is(#resourceTree,#resourceList)::-webkit-scrollbar-corner { background: transparent; }
+.resource-browser :is(#resourceTree,#resourceList)::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+.resource-browser :is(#resourceTree,#resourceList)::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background: rgba(255,255,255,.18);
+  background-clip: padding-box;
+}
+.resource-browser :is(#resourceTree,#resourceList)::-webkit-scrollbar-thumb:hover { background-color: rgba(255,255,255,.32); }
+.resource-browser :is(#resourceTree,#resourceList)::-webkit-scrollbar-thumb:active { background-color: rgba(255,255,255,.44); }
+.resource-videos { padding-left: 3px; }
+
+/* Resource browser uses the same outlined icon family as the player controls. */
+.resource-browser button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
+.resource-browser svg { display: block; flex: 0 0 16px; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+.resource-browser nav button:has(> svg:only-child),#resourceClose { min-width: 28px; padding-inline: 5px; }
+.resource-browser .resource-entry { justify-content: flex-start; }
+.resource-browser .resource-entry-icon { display: flex; align-items: center; justify-content: center; flex: 0 0 18px; }
+.resource-browser .resource-entry.playing .resource-entry-icon { color: var(--text); }
+.resource-browser .resource-tree-label { justify-content: flex-start; }
+.resource-tree-label > svg { color: var(--muted); }
+.resource-tree-row > button:first-child svg { width: 12px; height: 12px; flex-basis: 12px; }
+.resource-browser header button,.resource-browser nav button { color: #b5b5b5; }
+.resource-browser button:disabled { color: var(--muted); }
+
+/* Mode switching sits beside the window controls in both layouts. */
+.topbar :is(#toggleResourceBrowser, #cleanModeBtn) svg { width: 16px; height: 16px; }
+.clean-window-controls #cleanModeExitBtn { margin: 0; border: 0; border-radius: 3px; }
+
+/* Shared stroke and optical size for the title-bar icon family. */
+body:not(.clean-mode) .topbar :is(#openVideoBtn, #toggleResourceBrowser, #cleanModeBtn, #reviewMenu > summary, #topMore > summary),
+body.desktop-runtime:not(.clean-mode) .topbar :is(#openVideoBtn, #toggleResourceBrowser, #cleanModeBtn, #reviewMenu > summary, #topMore > summary) {
+  width: 28px; height: 28px; padding: 0; border: 0; border-radius: 5px;
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 28px; color: #ababab;
+}
+body:not(.clean-mode) .topbar :is(#openVideoBtn, #toggleResourceBrowser, #cleanModeBtn, #reviewMenu > summary, #topMore > summary, .window-control-button) svg,
+body.desktop-runtime:not(.clean-mode) .topbar :is(#openVideoBtn, #toggleResourceBrowser, #cleanModeBtn, #reviewMenu > summary, #topMore > summary, .window-control-button) svg {
+  width: 15px; height: 15px; flex: 0 0 15px; fill: none; stroke: currentColor;
+  stroke-width: 1.85; stroke-linecap: round; stroke-linejoin: round;
+}
+body:not(.clean-mode) .topbar :is(#openVideoBtn, #toggleResourceBrowser, #cleanModeBtn, #reviewMenu > summary, #topMore > summary):hover,
+body:not(.clean-mode) .topbar #toggleResourceBrowser[aria-pressed="true"] {
+  color: #ededed; background: rgba(255,255,255,.09);
+}
+
+/* Match the right-side title-bar hit areas without extra inter-group spacing. */
+body.desktop-runtime:not(.clean-mode) .topbar .top-actions { gap: 0; }
+body.desktop-runtime:not(.clean-mode) .topbar .window-controls { margin-left: 0; padding-left: 0; }
+body.desktop-runtime:not(.clean-mode) .topbar :is(#cleanModeBtn, #topMore > summary) {
+  width: 36px; flex-basis: 36px;
+}
+body.desktop-runtime:not(.clean-mode) .topbar .window-control-button { color: #ababab; }
+body.desktop-runtime:not(.clean-mode) .topbar .window-control-button:hover { color: #ededed; }
+
+/* Keep the browsing workspace available on return, but out of pure viewing. */
+.clean-mode .resource-browser { display: none !important; }
+.clean-window-controls #cleanModeExitBtn svg {
+  width: 15px; height: 15px; stroke-width: 1.85;
+}
+
+/* Reserve all four buttons outside the native title-drag hit region. */
+.clean-window-controls .window-control-button { flex: 0 0 36px; -webkit-app-region: no-drag; }
+.clean-window-controls .window-control-button svg { pointer-events: none; }
+body:not(.desktop-runtime).clean-mode .clean-window-controls { display: flex; position: absolute; top: 8px; right: 8px; z-index: 30; }
+body:not(.desktop-runtime) .clean-window-controls button:not(#cleanModeExitBtn) { display: none; }
+
+/* Match the clean-mode exit glyph to the neighboring window controls. */
+body.clean-mode .clean-window-controls #cleanModeExitBtn {
+  color: #8f9ca7; background: transparent;
+}
+body.clean-mode .clean-window-controls #cleanModeExitBtn svg {
+  width: 13px; height: 13px; stroke-width: 1.5;
+}
+body.clean-mode .clean-window-controls #cleanModeExitBtn:hover {
+  color: #8f9ca7; background: rgba(255,255,255,.09);
+}
+body.clean-mode .clean-window-controls .window-control-button { color: #8f9ca7; }
+
+/* Keep a composited frame over the GPU surface until mode resize has presented. */
+.mode-presentation-canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 9; visibility: hidden; pointer-events: none; }
+.mode-presentation-canvas.visible { visibility: visible; }
+
+/* Settings must stay readable outside the clean dock's backdrop-filter root. */
+.transport-settings-popover {
+  background: rgb(24,24,24);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+body.ambient-lit .transport-settings-popover {
+  background: var(--settings-ambient-background, rgb(24,24,24));
+}
+body.clean-mode .transport-settings-popover:popover-open {
+  position: fixed; inset: auto; margin: 0;
+  background: rgba(24,24,24,.42); color: #dedede;
+  border: 1px solid rgba(255,255,255,.075); border-radius: 10px;
+  box-shadow: 0 6px 22px rgba(0,0,0,.18);
+  backdrop-filter: blur(32px) saturate(1.15);
+  -webkit-backdrop-filter: blur(32px) saturate(1.15);
+}
+body.clean-mode .transport-settings-popover::backdrop { background: transparent; pointer-events: none; }
+
+/* Top window actions follow header hover, independently of playback controls. */
+body.clean-mode:not(.clean-window-controls-visible) .clean-window-controls {
+  opacity: 0; visibility: hidden; translate: 0 -4px; pointer-events: none;
+  transition: opacity .24s ease, translate .28s cubic-bezier(.22,.61,.36,1), visibility 0s linear .28s;
+}
+body.clean-mode.clean-window-controls-visible .clean-window-controls {
+  opacity: 1; visibility: visible; translate: 0 0; pointer-events: auto;
+  transition: opacity .2s ease, translate .28s cubic-bezier(.22,.61,.36,1), visibility 0s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.clean-mode:not(.clean-window-controls-visible) .clean-window-controls,
+  body.clean-mode.clean-window-controls-visible .clean-window-controls {
+    translate: none; transition: none;
+  }
+}

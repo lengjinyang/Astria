@@ -68,9 +68,16 @@
       return this.session;
     }
     fail(error) { this.error = error; this.emit('error', { message: error.message || String(error) }); }
-    call(command, ...args) { return this.ensureSession().then(id => this.api[command](id, ...args)).catch(error => { this.fail(error); throw error; }); }
+    call(command, ...args) {
+      const generation = this.generation;
+      return this.ensureSession().then(id => {
+        if (generation !== this.generation) return;
+        return this.api[command](id, ...args);
+      }).catch(error => { if (generation === this.generation) this.fail(error); throw error; });
+    }
     fire(command, ...args) { this.call(command, ...args).catch(() => {}); }
     async open(media) {
+      this.stopReverse(); this.seeking = false; this.stepping = false;
       const generation = ++this.generation;
       this.media = media; this.src = media.url; this.currentSrc = media.url; this.readyState = 0; this.time = 0;
       this.videoWidth = 0; this.videoHeight = 0; this.duration = 0; this.frameStates.clear(); this.renderedFrames.clear();
@@ -165,18 +172,18 @@
     }
     drawSoftware(frame) {
       if (!this.acceptFrame(frame)) return;
-      this.resize(frame.width, frame.height);
       // Upload software-decoded pixels through WebGL2, then expose a compositable canvas.
       if (!this.upload) this.upload = new SoftwareFrameUpload();
       this.upload.draw(frame);
       if (this.finishSourceFrame(frame, this.upload.canvas)) return;
+      this.resize(frame.width, frame.height);
       this.ensurePresenter().draw(this.upload.canvas);
       this.markFrameRendered(frame);
     }
     play() { this.stopReverse(); this.stepping = false; return this.call('play'); }
     pause() { this.stopReverse(); if (this.session) this.fire('pause'); }
     stop() { this.stopReverse(); if (this.session) this.fire('stop'); this.readyState = 0; }
-    seek(time) { this.seeking = true; this.fire('seek', time); }
+    seek(time) { this.seeking = true; this.fire('seek', time, this.media?.mediaId); }
     step(direction) { this.pause(); this.stepping = true; this.seeking = true; this.fire('step', direction); }
     setSpeed(value) { this._speed = value; if (this.session) this.fire('setSpeed', value); }
     setVolume(value) { this._volume = value; if (this.session) this.fire('setVolume', value); }
@@ -237,7 +244,9 @@
   class FrameSurfaceRenderer {
     constructor(canvas) {
       this.canvas = canvas;
-      const gl = this.gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true, alpha: false, antialias: false, desynchronized: true });
+      // Commit resize, pixels and page layout together. Low-latency canvas
+      // presentation can expose a cleared buffer during native window resizing.
+      const gl = this.gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true, alpha: false, antialias: false, desynchronized: false });
       if (!gl) {
         this.context = canvas.getContext('2d', { alpha: false });
         if (!this.context) throw new Error('画面 Canvas 不可用');
@@ -260,6 +269,22 @@
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     }
     draw(source) {
+      // Normalize native VideoFrames through one explicit sRGB conversion.
+      // Direct VideoFrame uploads can take different Chromium fast paths for
+      // texture allocation and updates; canvas uploads must not reinterpret
+      // the gamma24 metadata again when the output size changes.
+      if (typeof source.displayWidth === 'number' && source.colorSpace) {
+        if (!this.srgbSurface) {
+          this.srgbSurface = document.createElement('canvas');
+          this.srgbContext = this.srgbSurface.getContext('2d', { alpha: false, colorSpace: 'srgb' });
+        }
+        if (this.srgbSurface.width !== source.displayWidth || this.srgbSurface.height !== source.displayHeight) {
+          this.srgbSurface.width = source.displayWidth;
+          this.srgbSurface.height = source.displayHeight;
+        }
+        this.srgbContext.drawImage(source, 0, 0);
+        source = this.srgbSurface;
+      }
       if (!this.gl) {
         this.context.drawImage(source, 0, 0, this.canvas.width, this.canvas.height);
         return;

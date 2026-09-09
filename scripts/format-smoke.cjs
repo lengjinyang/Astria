@@ -18,8 +18,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
         }
         const info=player.getInfo();if(!loaded||!info.width)throw Error(name+': decode timeout');
         const frame=player.renderFrame(info.width,info.height);if(frame.rgba.length!==info.width*info.height*4)throw Error('bad frame');
-        if(media.missingFrames.length && media.missingFrames[0]!==1003)throw Error('missing frame mismatch');
-        console.log('FORMAT_PASS',name,info['video-codec'],media.totalFrames,JSON.stringify(media.missingFrames));
+        const expectedRanges = name === 'png/shot_1001.png' ? [[1003,1003]] : [];
+        if(JSON.stringify(media.missingFrameRanges)!==JSON.stringify(expectedRanges))throw Error('missing frame mismatch');
+        console.log('FORMAT_PASS',name,info['video-codec'],media.totalFrames,JSON.stringify(media.missingFrameRanges));
       } finally {player.destroy();}
     }
   } finally {await catalog.dispose();}

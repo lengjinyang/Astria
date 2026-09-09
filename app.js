@@ -28,7 +28,7 @@
     togglePlay: () => playback.paused && !state.isReverse ? play() : pause(),
     previousFrame: () => step(-1), nextFrame: () => step(1), loopIn: () => setLoopPoint('in'), loopOut: () => setLoopPoint('out'),
     bookmark: () => createBookmark(), luma: () => $('#lumaBtn').click(), pixelInspector: () => setPixelInspector(!state.pixelInspector), toggleGuides: () => toggleCompositionGuides(), cleanMode: () => setCleanMode(!state.cleanMode),
-    togglePanel: () => setPanelOpen(!state.panelOpen), resetView: () => resetViewerView(), resetTimeline: () => resetTimelineZoom()
+    togglePanel: () => setPanelOpen(state.cleanMode || !state.panelOpen), resetView: () => resetViewerView(), resetTimeline: () => resetTimelineZoom()
   });
 
   const els = {
@@ -286,7 +286,7 @@
     else if (!ready && topbar.parentElement !== shell) shell.prepend(topbar);
     document.body.classList.toggle('media-ready', ready);
     $$('.transport button, .transport input, .transport select, .annotation-toolbar button, .annotation-toolbar input, .luma-control button, #lumaContrast, #resetTimelineZoomBtn, #addBookmarkBtn, #cleanModeBtn, #pixelInspectorBtn, #exportAnnotatedFrameBtn').forEach(control => {
-      const alwaysEnabled = ['togglePanelBtn','openDefaultAppsBtn','autoplaySwitch','rememberPlaybackPositionSwitch','startupModeSelect','hoverPreviewSwitch','previewSizeRange','previewSizeNumber','previewSizeDownBtn','previewSizeUpBtn','previewSizeResetBtn'].includes(control.id);
+      const alwaysEnabled = ['togglePanelBtn','toggleResourceBrowser','openDefaultAppsBtn','autoplaySwitch','rememberPlaybackPositionSwitch','startupModeSelect','hoverPreviewSwitch','previewSizeRange','previewSizeNumber','previewSizeDownBtn','previewSizeUpBtn','previewSizeResetBtn'].includes(control.id);
       control.disabled = alwaysEnabled ? false : !interactive;
       control.setAttribute('aria-disabled', String(alwaysEnabled ? false : !interactive));
     });
@@ -357,6 +357,7 @@
     topbarAmbientCtx.clearRect(0, 0, 64, 36);
     ambient.canvas.classList.remove('active');
     document.body.classList.remove('ambient-lit');
+    document.documentElement.style.removeProperty('--settings-ambient-background');
   }
 
   function blendAmbient() {
@@ -368,6 +369,20 @@
     topbarAmbientCtx.clearRect(0, 0, 64, 36);
     topbarAmbientCtx.drawImage(ambient.canvas, 0, 0);
     ambient.canvas.classList.add('active');
+    // Give popovers their own opaque ambient material: nested backdrop filters
+    // cannot reliably sample the video outside the floating transport panel.
+    const pixels = ambientCtx.getImageData(0, 0, 64, 36).data;
+    const tones = [0, 1, 2].map(band => {
+      const rgb = [0, 0, 0];
+      for (let y = band * 12; y < (band + 1) * 12; y++) {
+        for (let x = 0; x < 64; x++) {
+          const offset = (y * 64 + x) * 4;
+          for (let channel = 0; channel < 3; channel++) rgb[channel] += pixels[offset + channel];
+        }
+      }
+      return `rgb(${rgb.map(value => Math.round(20 + value / 768 * .16)).join(',')})`;
+    });
+    document.documentElement.style.setProperty('--settings-ambient-background', `linear-gradient(160deg, ${tones.join(',')})`);
     document.body.classList.add('ambient-lit');
     if (--ambient.steps > 0) ambient.timer = setTimeout(blendAmbient, 80);
   }
@@ -418,7 +433,7 @@
 
   function controlsAreHeld() {
     return (!state.isReverse && playback.paused) || !!state.timelineScrub || !!state.scrub ||
-      !!document.querySelector('.clean-mode .bottom-dock:hover, .transport:hover, .timeline-panel:hover, .clean-window-controls:hover, .transport details[open], .transport :focus-visible, .timeline-panel :focus-visible');
+      !!document.querySelector('.clean-mode .bottom-dock:hover, .transport:hover, .timeline-panel:hover, .clean-window-controls:hover, .clean-window-controls:focus-within, .transport details[open], .transport :focus-visible, .timeline-panel :focus-visible');
   }
 
   function scheduleCleanControlsHide(delay = 2000) {
@@ -454,28 +469,29 @@
   const nativeClassicPointer = !!desktopAPI?.onWindowPointer;
 
   function refreshClassicTopbar() {
+    const visibilityClass = state.cleanMode ? 'clean-window-controls-visible' : 'classic-topbar-visible';
     const pinned = state.controlsVisibility === 'always';
     const held = heldTopbar();
-    const visible = document.body.classList.contains('classic-topbar-visible');
+    const visible = document.body.classList.contains(visibilityClass);
     const cancelReveal = () => { clearTimeout(classicRevealTimer); classicRevealTimer = null; };
     const cancelHide = () => { clearTimeout(classicTopbarTimer); classicTopbarTimer = null; };
-    if (state.cleanMode || (classicWindowOutside && !pinned)) {
+    if (classicWindowOutside && !pinned && !held) {
       cancelReveal(); cancelHide();
-      document.body.classList.remove('classic-topbar-visible');
+      document.body.classList.remove(visibilityClass);
       return;
     }
     if (pinned || held) {
       cancelReveal(); cancelHide();
-      document.body.classList.add('classic-topbar-visible');
+      document.body.classList.add(visibilityClass);
       return;
     }
     if (classicPointerInside) {
       cancelHide();
       if (!visible && classicRevealTimer === null) classicRevealTimer = setTimeout(() => {
         classicRevealTimer = null;
-        if (classicPointerInside && !classicWindowOutside && !state.cleanMode &&
+        if (classicPointerInside && !classicWindowOutside &&
             !document.querySelector('.modal-backdrop.open')) {
-          document.body.classList.add('classic-topbar-visible');
+          document.body.classList.add(visibilityClass);
         }
       }, 90);
       return;
@@ -484,23 +500,23 @@
     if (visible && classicTopbarTimer === null) classicTopbarTimer = setTimeout(() => {
       classicTopbarTimer = null;
       if (!classicPointerInside && !heldTopbar() && state.controlsVisibility !== 'always') {
-        document.body.classList.remove('classic-topbar-visible');
+        document.body.classList.remove(visibilityClass);
       }
-    }, 500);
+    }, state.cleanMode ? 200 : 500);
   }
   function updateClassicTopbar(event) {
     // Native drag regions can synthesize DOM leave/enter without cursor movement.
     // Desktop hover has one authority; DOM coordinates remain the browser fallback.
     if (nativeClassicPointer && !event.nativePointer) return;
-    const topbar = $('.topbar');
-    const rect = topbar.getBoundingClientRect();
+    const topbar = state.cleanMode ? $('.clean-window-controls') : $('.topbar');
+    const rect = state.cleanMode ? { left: 0, right: innerWidth, top: 0 } : topbar.getBoundingClientRect();
     setClassicWindowPointer(true);
     if (document.querySelector('.modal-backdrop.open') || event.target?.closest?.('.modal-backdrop')) {
       classicPointerInside = false;
       refreshClassicTopbar();
       return;
     }
-    const revealed = document.body.classList.contains('classic-topbar-visible');
+    const revealed = document.body.classList.contains(state.cleanMode ? 'clean-window-controls-visible' : 'classic-topbar-visible');
     // A wider exit boundary keeps the header stable around the reveal edge.
     const triggerTop = document.body.classList.contains('media-ready') ? 0 : rect.top;
     const triggerBottom = triggerTop + Math.max(topbar.offsetHeight, 36) + (revealed ? 8 : 0);
@@ -508,7 +524,7 @@
       event.clientY >= triggerTop && event.clientY <= triggerBottom) || (revealed && !!event.target?.closest?.('.topbar'));
     refreshClassicTopbar();
   }
-  function heldTopbar() { return $('.topbar').matches(':has(details[open], .export-menu.open, :focus-visible)'); }
+  function heldTopbar() { return state.cleanMode ? $('.clean-window-controls').matches(':focus-within') : $('.topbar').matches(':has(details[open], .export-menu.open, :focus-visible)'); }
   function setClassicWindowPointer(inside) {
     if (!inside) { clearTimeout(classicRevealTimer); classicRevealTimer = null; }
     clearTimeout(classicWindowExitTimer);
@@ -525,7 +541,7 @@
       classicWindowOutside = true;
       classicPointerInside = false;
       refreshClassicTopbar();
-    }, 500);
+    }, state.cleanMode ? 200 : 500);
   }
   function scheduleClassicTopbarUpdate(event) {
     if (nativeClassicPointer) return;
@@ -563,20 +579,72 @@
       bottomInset: state.cleanMode ? 0 : 44, sideInset, resizeWindow, initialCommit }).catch(() => false) || Promise.resolve(false);
   }
 
-  function setCleanMode(enabled, resizeWindow = true) {
+  let modePresentationTicket = 0;
+  let modePresentationTimer = null;
+  const modePresentationCanvas = document.createElement('canvas');
+  modePresentationCanvas.className = 'mode-presentation-canvas';
+  modePresentationCanvas.setAttribute('aria-hidden', 'true');
+  els.mediaSurface.appendChild(modePresentationCanvas);
+  function clearModePresentation() {
+    modePresentationTicket++;
+    clearTimeout(modePresentationTimer);
+    modePresentationCanvas.classList.remove('visible');
+  }
+  function holdModePresentation() {
+    clearModePresentation();
+    const ticket = modePresentationTicket;
+    if (playback.readyState < 2) return ticket;
+    const source = state.colorPreset !== 'original' && els.colorCanvas.width ? els.colorCanvas :
+      els.cacheCanvas.classList.contains('visible') ? els.cacheCanvas : playback.currentFrameCanvas;
+    if (!source) return ticket;
+    try {
+      const width = source.videoWidth || source.width, height = source.videoHeight || source.height;
+      const scale = Math.min(1, 2048 / width, 2048 / height);
+      modePresentationCanvas.width = Math.max(1, Math.round(width * scale));
+      modePresentationCanvas.height = Math.max(1, Math.round(height * scale));
+      const context = modePresentationCanvas.getContext('2d', { alpha: false });
+      context.filter = getComputedStyle(source).filter;
+      context.drawImage(source, 0, 0, modePresentationCanvas.width, modePresentationCanvas.height);
+      modePresentationCanvas.classList.add('visible');
+      // A failed decoder request must never leave a permanent frozen picture.
+      modePresentationTimer = setTimeout(() => { if(ticket === modePresentationTicket) clearModePresentation(); }, 1500);
+    } catch { clearModePresentation(); }
+    return ticket;
+  }
+  async function finishModePresentation(ticket, windowFit) {
+    const nextPaint = () => new Promise(resolve => requestAnimationFrame(resolve));
+    try {
+      await windowFit;
+      await nextPaint(); await nextPaint();
+      if(ticket !== modePresentationTicket) return;
+      resizeCanvas();
+      await playback.requestSourceFrame?.('exact');
+      if(ticket !== modePresentationTicket) return;
+      scheduleColorRender();
+      await nextPaint(); await nextPaint();
+    } catch { /* Retain the captured picture until the bounded fallback. */ return; }
+    if(ticket === modePresentationTicket) clearModePresentation();
+  }
+
+  function setCleanMode(enabled, updateWindowInsets = true) {
     hideTimelinePreview();
     if (enabled && !playback.duration && !state.mediaPosterPresented) { toast('请先打开视频'); return; }
     if (state.cleanMode === enabled) return;
+    const presentationTicket = holdModePresentation();
     state.cleanMode = enabled;
-    if (resizeWindow) fitVideoWindowToMedia();
+    // Fit a floating window to the picture; clean mode has no reserved chrome.
+    const windowFit = updateWindowInsets ? fitVideoWindowToMedia(true) : Promise.resolve();
     clearTimeout(classicTopbarTimer); classicTopbarTimer = null;
     clearTimeout(classicRevealTimer); classicRevealTimer = null;
     clearTimeout(classicWindowExitTimer); classicWindowExitTimer = null;
     classicPointerInside = false;
     if (enabled) closeClassicTopbarMenus();
+    $('#transportSettings').open = false;
+    $('#volumeDisclosure').open = false;
     clearTimeout(state.cleanControlsTimer);
     document.body.classList.toggle('clean-mode', enabled);
-    document.body.classList.remove('classic-topbar-visible');
+    document.body.classList.remove('classic-topbar-visible', 'clean-window-controls-visible');
+    refreshClassicTopbar();
     document.body.classList.remove('clean-pointer-outside');
     document.body.classList.toggle('clean-controls-visible', enabled);
     $('#cleanModeBtn').classList.toggle('active', enabled);
@@ -590,7 +658,10 @@
       scheduleCleanControlsHide();
     }
     revealCleanControls();
-    requestAnimationFrame(() => { resizeCanvas(); updatePlaybackUI(); });
+    // Commit the picture geometry with the mode class, before the next paint.
+    resizeCanvas();
+    updatePlaybackUI();
+    void finishModePresentation(presentationTicket, windowFit);
   }
   function pause(outputMode = null) { playback.pause(); stopReverse(); updateMediaOutputTarget(outputMode); }
   function hasLoopRange() {
@@ -1399,6 +1470,7 @@
     state.mediaProbeGeneration += 1;
     if (state.activeMediaProbeId) state.cancelledMediaProbeIds.add(state.activeMediaProbeId);
     state.activeMediaProbeId = null; state.mediaProbing = false;
+    clearModePresentation();
     state.mediaLoadGeneration += 1;
     state.mediaAwaitingMetadata = false; state.mediaAwaitingFirstFrame = false; state.mediaReplacing = false; state.mediaPosterPresented = false;
     clearTimeout(state.resumePresentationTimer); state.resumePresentationTimer = null; state.resumeCorrectionRequested = false;
@@ -1443,6 +1515,7 @@
     state.annotationUndo = []; state.quickGesture = null;
     state.viewerZoomMode = 'fit'; state.viewerZoom = 1; state.viewerPan = { x: 0, y: 0 };
     clearMediaPresentationAnimation();
+    clearModePresentation();
     state.mediaLoadGeneration += 1;
     state.mediaAwaitingMetadata = true;
     state.mediaAwaitingFirstFrame = true;
@@ -1458,6 +1531,7 @@
     if (state.currentObjectUrl) URL.revokeObjectURL(state.currentObjectUrl);
     state.currentObjectUrl = ownedObjectUrl;
     state.sourcePath = media.path || null;
+    window.videoResourceBrowser?.setMedia(state.sourcePath);
     state.fileName = media.name;
     state.fileMeta = { name: media.name, size: media.size || 0, type: media.type || 'video/*', modified: media.lastModified || 0, path: media.path || null, mediaId: media.mediaId, mediaKind: media.mediaKind || 'video', sourceFps: media.sourceFps || null, sourceFrameOffset: media.sourceFrameOffset || 0, sequence: media.sequence || null };
     const generation = state.mediaLoadGeneration;
@@ -1703,6 +1777,32 @@
     playback.setOutputTarget(width, height, activeMode);
   }
 
+  function positionTransportSettings() {
+    const disclosure = $('#transportSettings');
+    const menu = $('.transport-settings-popover', disclosure);
+    if (!disclosure.open || !state.cleanMode) {
+      if (menu.matches(':popover-open')) menu.hidePopover();
+      menu.removeAttribute('popover');
+      menu.style.removeProperty('left');
+      menu.style.removeProperty('top');
+    }
+    if (!disclosure.open) return;
+    const anchor = $('summary', disclosure).getBoundingClientRect();
+    menu.style.maxHeight = `${Math.max(40, anchor.top - 16)}px`;
+    menu.style.translate = '0 0';
+    if (state.cleanMode) {
+      // Escape the dock's backdrop root while retaining disclosure ancestry.
+      menu.setAttribute('popover', 'manual');
+      if (!menu.matches(':popover-open')) menu.showPopover();
+      menu.style.left = `${Math.max(8, Math.min(innerWidth - menu.offsetWidth - 8, anchor.right - menu.offsetWidth))}px`;
+      menu.style.top = `${Math.max(8, anchor.top - menu.offsetHeight - 8)}px`;
+      return;
+    }
+    const bounds = menu.getBoundingClientRect();
+    const shift = bounds.left < 8 ? 8 - bounds.left : bounds.right > innerWidth - 8 ? innerWidth - 8 - bounds.right : 0;
+    menu.style.translate = `${shift}px 0`;
+  }
+
   function scheduleLayoutRefresh() {
     hideTimelinePreview();
     if (state.viewerResizeRaf !== null) return;
@@ -1710,6 +1810,7 @@
       state.viewerResizeRaf = null;
       const lightweight = document.body.classList.contains('window-interacting');
       resizeCanvas(lightweight);
+      positionTransportSettings();
       if (!lightweight) {
         renderRuler();
         updatePlaybackUI();
@@ -1991,6 +2092,7 @@
   }
 
   function setPanelOpen(open) {
+    if (open && state.cleanMode) setCleanMode(false);
     state.panelOpen = !!open;
     document.body.classList.toggle('panel-collapsed', !state.panelOpen);
     const toggle = $('#togglePanelBtn');
@@ -2437,7 +2539,7 @@
     if (!state.playbackPosterDirty && Number.isFinite(state.lastSavedPlaybackPosition) && Math.abs(position - state.lastSavedPlaybackPosition) < .25) return;
     state.lastSavedPlaybackPosition = position;
     state.playbackPosterDirty = false;
-    void persistMediaSnapshot(state.currentMediaKey, playbackProgressSnapshot(position))?.catch?.(() => {});
+    return persistMediaSnapshot(state.currentMediaKey, playbackProgressSnapshot(position))?.catch?.(() => {});
   }
 
   function schedulePlaybackPositionSave() {
@@ -2482,10 +2584,11 @@
       state.playbackPositionSaveTimer = null;
       if (state.rememberPlaybackPosition) capturePlaybackPoster();
       persistPreferences();
+      if (!state.currentWorkspaceReady) return;
       if (state.autosave && state.currentMediaKey) {
         state.lastSavedPlaybackPosition = rememberedPlaybackPosition();
-        void persistMediaSnapshot(state.currentMediaKey, workspaceData())?.catch?.(() => { els.notesSaved.textContent = '保存失败'; });
-      } else persistPlaybackPositionNow();
+        return persistMediaSnapshot(state.currentMediaKey, workspaceData())?.catch?.(() => { els.notesSaved.textContent = '保存失败'; });
+      } else return persistPlaybackPositionNow();
     } catch { toast('本地存储空间不足，请导出工作区'); }
   }
 
@@ -3180,6 +3283,7 @@
   }
 
   function setPixelInspector(enabled) {
+    if (enabled && state.cleanMode) setCleanMode(false);
     state.pixelInspector = !!enabled;
     $('#pixelInspectorBtn').classList.toggle('active', state.pixelInspector);
     $('#pixelInspectorBtn').setAttribute('aria-pressed', String(state.pixelInspector));
@@ -3535,9 +3639,10 @@
     $$('#windowCloseBtn, #cleanWindowCloseBtn').forEach(button=>button.addEventListener('click',e=>{e.stopPropagation();desktopAPI?.closeWindow();}));
     $('#cleanModeBtn').addEventListener('click',()=>setCleanMode(!state.cleanMode));
     $('#cleanModeExitBtn').addEventListener('click',()=>setCleanMode(false));
+    $('.clean-window-controls').addEventListener('pointerdown',event=>event.stopPropagation());
     const volumeDisclosure = $('#volumeDisclosure');
     const transportSettings = $('#transportSettings');
-    transportSettings.addEventListener('toggle', () => { if (transportSettings.open) { volumeDisclosure.open = false; setPanelOpen(false); } });
+    transportSettings.addEventListener('toggle', () => { if (transportSettings.open) { volumeDisclosure.open = false; setPanelOpen(false); } positionTransportSettings(); });
     volumeDisclosure.addEventListener('toggle', () => { if (volumeDisclosure.open) { transportSettings.open = false; setPanelOpen(false); } });
     $('#lumaBtn').addEventListener('click',()=>{state.lumaMode=!state.lumaMode;els.viewerStage.classList.toggle('luma-mode',state.lumaMode);$('#lumaBtn').classList.toggle('active',state.lumaMode);$('#lumaControl').classList.toggle('active',state.lumaMode);scheduleColorRender();toast(state.lumaMode?'明暗检查已开启':'明暗检查已关闭');saveWorkspace();});
     els.lumaContrast.addEventListener('input',e=>{state.lumaContrast=Number(e.target.value)/100;els.lumaContrastValue.textContent=`${e.target.value}%`;els.viewerStage.style.setProperty('--luma-contrast',state.lumaContrast);scheduleColorRender();});
@@ -3674,6 +3779,7 @@
     $('#copyPixelBtn').addEventListener('click',copyPixelSample);
     $('#exportAnnotatedFrameBtn').addEventListener('click',exportCurrentAnnotatedFrame);
     $('.panel-tabs').addEventListener('click',e=>{const tab=e.target.closest('[data-panel]');if(tab)showPanel(tab.dataset.panel);});
+    window.videoResourceBrowser?.init(openRecentPath);
     $('#togglePanelBtn').addEventListener('click',()=>setPanelOpen(!state.panelOpen));
     $('#closePanelBtn').addEventListener('click',()=>setPanelOpen(false));
     $('#saveBtn').addEventListener('click',()=>{closeClassicTopbarMenus();saveWorkspace(true);});
@@ -3743,7 +3849,7 @@
       clearTimeout(state.cleanControlsTimer);
       cleanWindowExitTimer = setTimeout(() => {
         cleanWindowExitTimer = null;
-        if (state.controlsVisibility === 'always') return;
+        if (!state.cleanMode || state.controlsVisibility === 'always' || document.querySelector('.clean-window-controls:focus-within, .transport :focus-visible')) return;
         document.body.classList.add('clean-pointer-outside');
         document.body.classList.remove('clean-controls-visible');
         hideTimelinePreview();
@@ -3755,7 +3861,7 @@
       setClassicWindowPointer(inside);
       if (inside) {
         clearTimeout(cleanWindowExitTimer); cleanWindowExitTimer = null;
-        if (!state.cleanMode && Number.isFinite(x) && Number.isFinite(y)) {
+        if (Number.isFinite(x) && Number.isFinite(y)) {
           updateClassicTopbar({clientX:x, clientY:y, target:document.elementFromPoint(x,y), nativePointer:true});
         }
         if (document.body.classList.contains('clean-pointer-outside')) {
@@ -3775,6 +3881,8 @@
       if (target) updateClassicTopbar({ clientX: event.clientX, clientY: event.clientY, target });
       else { classicPointerInside = false; refreshClassicTopbar(); }
     });
+    $('.clean-window-controls').addEventListener('focusin', refreshClassicTopbar);
+    $('.clean-window-controls').addEventListener('focusout', () => queueMicrotask(refreshClassicTopbar));
     topbar.addEventListener('focusin', refreshClassicTopbar);
     topbar.addEventListener('focusout', () => queueMicrotask(refreshClassicTopbar));
     $$('.topbar details').forEach(menu => menu.addEventListener('toggle', refreshClassicTopbar));
@@ -3809,13 +3917,16 @@
       surface.addEventListener('focusout',()=>queueMicrotask(scheduleCleanControlsHide));
     });
     $$('.transport details').forEach(menu=>menu.addEventListener('toggle',revealCleanControls));
-    window.addEventListener('beforeunload',persistCurrentWorkspaceNow);
     let rendererClosing = false;
+    window.addEventListener('beforeunload',()=>{if(!rendererClosing)persistCurrentWorkspaceNow();});
     desktopAPI?.onPrepareClose(async () => {
       if (rendererClosing) return;
       rendererClosing = true;
       try {
-        persistCurrentWorkspaceNow();
+        // Stop audible playback immediately while preserving the current
+        // frame for the launch poster and the final playback position.
+        playback.pause();
+        await persistCurrentWorkspaceNow();
         state.contactSheetCancel = true;
         disposeTimelinePreview();
         try { await playback.destroy(); }

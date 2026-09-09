@@ -25,6 +25,8 @@ const on = (channel, callback) => {
 
 contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
   isDesktop: true,
+  browseDirectory: directory => ipcRenderer.invoke('vfx:browse-directory', directory),
+  chooseDirectory: () => ipcRenderer.invoke('vfx:choose-directory'),
   startupMark: name => ipcRenderer.send('vfx:startup-mark', name),
   platform: process.platform,
   media: Object.freeze({
@@ -33,7 +35,7 @@ contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
     play: id => ipcRenderer.invoke('media:play', id),
     pause: id => ipcRenderer.invoke('media:pause', id),
     stop: id => ipcRenderer.invoke('media:stop', id),
-    seek: (id, seconds) => ipcRenderer.invoke('media:seek', id, seconds),
+    seek: (id, seconds, mediaId) => ipcRenderer.invoke('media:seek', id, seconds, mediaId),
     step: (id, direction) => ipcRenderer.invoke('media:step', id, direction),
     setSpeed: (id, speed) => ipcRenderer.invoke('media:setSpeed', id, speed),
     setVolume: (id, volume) => ipcRenderer.invoke('media:setVolume', id, volume),
