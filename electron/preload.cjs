@@ -1,5 +1,9 @@
 const { contextBridge, ipcRenderer, sharedTexture, webUtils } = require('electron');
 
+let resolveInitialWindowShown;
+const initialWindowShown = new Promise(resolve => { resolveInitialWindowShown = resolve; });
+ipcRenderer.once('vfx:initial-window-shown', () => resolveInitialWindowShown(true));
+
 const textureCallbacks = new Map();
 if (sharedTexture) sharedTexture.setSharedTextureReceiver(async ({ importedSharedTexture }, id, metadata = {}) => {
   let frame = null;
@@ -21,6 +25,7 @@ const on = (channel, callback) => {
 
 contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
   isDesktop: true,
+  startupMark: name => ipcRenderer.send('vfx:startup-mark', name),
   platform: process.platform,
   media: Object.freeze({
     create: () => ipcRenderer.invoke('media:create'),
@@ -53,8 +58,9 @@ contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
   getRecentVideos: () => ipcRenderer.invoke('vfx:get-recent-videos'),
   clearRecentVideos: () => ipcRenderer.invoke('vfx:clear-recent-videos'),
   consumeLaunchMedia: () => ipcRenderer.invoke('vfx:consume-launch-media'),
+  whenWindowShown: () => initialWindowShown,
   rendererReady: () => ipcRenderer.send('vfx:renderer-ready'),
-  initialMediaPresented: () => ipcRenderer.send('vfx:initial-media-presented'),
+  initialMediaPresented: () => ipcRenderer.send('vfx:initial-media-presented', { reduceMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches }),
   loadAppData: () => ipcRenderer.invoke('vfx:load-app-data'),
   saveAppData: data => ipcRenderer.send('vfx:save-app-data', data),
   loadMediaWorkspace: key => ipcRenderer.invoke('vfx:load-media-workspace', key),

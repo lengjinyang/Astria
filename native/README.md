@@ -5,6 +5,30 @@ originates from electron-mpv-video commit `4944079` (MIT). No npm player wrapper
 is used at runtime. Electron is pinned to 40.10.5; the bridge uses N-API and is
 rebuilt against those Electron headers for every package build.
 
+## Startup initialization
+
+Desktop sessions construct `MpvPlayer` with `deferInitialization: true` and await
+`initialize()` before attaching callbacks or issuing playback commands. On Windows,
+mpv and WGL/D3D11 initialization run in a N-API worker. The hidden HWND is created
+and destroyed on the main thread; the worker releases the GL context before the
+render thread takes ownership. Closing a session waits for initialization to settle
+before releasing native resources. The default constructor remains synchronous for
+existing build tooling.
+
+Loading the addon and its DLL dependencies still happens synchronously. The renderer
+can prepare a saved playback poster while initialization is in progress. File-launch
+windows can reveal a cached poster after the complete playback shell is laid out.
+Controls stay disabled until the decoded frame is ready. Without a poster, the window
+waits for the decoded frame. Both paths keep HTML opaque, show the native window
+at zero opacity, allow two renderer animation frames, and then set native opacity
+to one. There is no screenshot readback or timer-driven native fade. Deferred
+workspace work and autoplay are released after the opacity commit. Launch state
+includes duration and source dimensions; older saved states use the poster ratio.
+
+Startup trace `window.shown` now describes the zero-opacity native show;
+`window.full-opacity` is the user-visible reveal. Compare full-opacity times
+between versions rather than the earlier native-show timestamp.
+
 ## Rebuild libmpv
 
 Prerequisites: Visual Studio 2022 C++ x64 tools and Windows SDK, Node.js,

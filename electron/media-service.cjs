@@ -1,4 +1,5 @@
 'use strict';
+const startupTrace = require('./startup-trace.cjs');
 const { ipcMain, sharedTexture } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -30,10 +31,24 @@ class MediaService {
     const handlers = {
       create: async event => {
         if (this.sessions.size >= 4) throw new Error('媒体会话数量已达上限');
+        startupTrace.mark('core.load-start');
         this.core ||= loadCore(app);
+        startupTrace.mark('core.load-end');
+        startupTrace.mark('session.construct-start');
         const session = new Session(this.core, event.sender, catalog);
+        startupTrace.mark('session.construct-end');
         this.sessions.set(session.id, session);
-        return session.id;
+        try {
+          await session.ready;
+          startupTrace.mark('session.ready');
+          if (this.closing || session.closed || event.sender.isDestroyed()) throw new Error('Media session closed');
+          return session.id;
+        } catch (error) {
+          startupTrace.mark('session.error');
+          await session.destroy();
+          this.sessions.delete(session.id);
+          throw error;
+        }
       },
       open: (event, id, mediaId, fps, startTime = 0) => this.session(event, id).open(mediaId, number(fps, 1, 240), number(startTime, 0, 1e10)),
       play: (event, id) => this.session(event, id).player.play(),
@@ -80,17 +95,18 @@ class MediaService {
 class Session {
   constructor(core, owner, catalog) {
     this.id = randomUUID(); this.core = core; this.owner = owner; this.catalog = catalog;
-    this.mode = sharedTexture && process.env.ASTRIA_RENDER_BACKEND !== 'software' ? 'shared-texture' : 'software'; this.closed = false; this.pending = false;
+    if (!sharedTexture) throw new Error('当前 Electron 运行时不支持 GPU 共享纹理');
+    this.mode = 'shared-texture'; this.closed = false; this.pending = false;
     this.outputTarget = { width: 0, height: 0, mode: 'source', revision: 0 };
     this.exactFrames = []; this.frameId = 0; this.inFlight = 0; this.releases = new Set(); this.windowInteraction = false; this.lockedOutputTarget = null; this.framePresentable = false;
-    try { this.player = new core.MpvPlayer({ mode: this.mode }); }
-    catch (error) {
-      if (this.mode !== 'shared-texture') throw error;
-      this.mode = 'software'; this.player = new core.MpvPlayer({ mode: this.mode });
-    }
+    this.player = new core.MpvPlayer({ mode: this.mode, deferInitialization: true });
+    this.ready = this.initialize();
+  }
+  async initialize() {
+    await this.player.initialize();
+    if (this.closed || this.owner.isDestroyed()) throw new Error('Media session closed');
     const version = this.player.getInfo()['mpv-version'];
     if (!/^mpv (?:v)?0\.41\.0(?:\s|$)/.test(version || '')) {
-      this.player.destroy();
       throw new Error(`需要 mpv 0.41.0，实际为 ${version}`);
     }
     this.attach();
@@ -102,6 +118,7 @@ class Session {
   }
   send(type, data = {}) { if (!this.closed && !this.owner.isDestroyed()) this.owner.send('media:state', { id: this.id, type, ...data }); }
   async open(mediaId, fps, startTime = 0) {
+    startupTrace.mark('media.open');
     const generation = this.generation = (this.generation || 0) + 1;
     if (this.mediaId && this.mediaId !== mediaId) await this.catalog.release(this.mediaId, this.id);
     this.mediaId = mediaId;
@@ -125,6 +142,7 @@ class Session {
       if (event.playlistEntryId && this.loadId && event.playlistEntryId !== this.loadId) continue;
       if (event.error) { this.send('error', { message: `无法解复用或解码此媒体（容器/编码不受支持或文件损坏）：${event.error}` }); continue; }
       if (event.type === 'file-loaded') {
+        startupTrace.mark('media.file-loaded');
         const info = this.player.getInfo(); this.loaded = true;
         this.time = Number.isFinite(info['time-pos']) ? info['time-pos'] : this.startTime;
         Object.assign(this.descriptor, { width: info.width || 0, height: info.height || 0,
@@ -273,7 +291,9 @@ class Session {
             if (!this.closed) this.queueFrame(false);
           };
           try {
+            startupTrace.mark('texture.import-start');
             texture = sharedTexture.importSharedTexture({ textureInfo, allReferencesReleased: releaseSlot });
+            startupTrace.mark('texture.import-end');
             this.inFlight += 1;
           } catch (error) {
             if (slotId !== null) renderPlayer.releaseSharedTexture(slotId);
@@ -281,8 +301,10 @@ class Session {
             releasedResolve();
             throw error;
           }
+          startupTrace.mark('texture.send-start');
           try { await sharedTexture.sendSharedTexture({ frame: this.owner.mainFrame, importedSharedTexture: texture }, this.id, metadata); }
           finally { texture.release(); }
+          startupTrace.mark('texture.send-end');
           // macOS and the diagnostic single-texture path do not expose slots.
           if (slotId === null) await released;
         } else {
@@ -296,17 +318,7 @@ class Session {
         request?.resolve(metadata);
       } catch (error) {
         request?.reject(error);
-        if (this.mode === 'shared-texture' && !this.closed) {
-          const position = this.time || 0, paused = this.paused;
-          this.player.setEventCallback(); this.player.setUpdateCallback();
-          if (this.releases.size) await Promise.all([...this.releases]);
-          this.player.destroy();
-          this.mode = 'software'; this.player = new this.core.MpvPlayer({ mode: 'software' });
-          this.attach(); this.restore = { position, paused };
-          await this.open(this.descriptor.mediaId, this.descriptor.fps);
-          return;
-        }
-        this.send('error', { message: `输出画面失败：${error.message}` }); return;
+        this.send('error', { message: `GPU 共享纹理输出失败：${error.message}` }); return;
       }
     }
   }
@@ -318,7 +330,10 @@ class Session {
   destroy() {
     if (this.destroyPromise) return this.destroyPromise;
     this.destroyPromise = (async () => {
-      this.closed = true; this.player.setEventCallback(); this.player.setUpdateCallback();
+      this.closed = true;
+      // Initialization owns the native resources until its promise settles.
+      await this.ready.catch(() => {});
+      this.player.setEventCallback(); this.player.setUpdateCallback();
       const error = new Error('媒体会话已关闭');
       for (const request of this.exactFrames.splice(0)) request.reject(error);
       if (this.pumping) await this.pumping.catch(() => {});

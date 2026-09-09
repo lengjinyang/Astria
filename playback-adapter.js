@@ -48,7 +48,9 @@
     constructor(element) {
       super(); this.api = window.desktopAPI.media; this.surface = document.createElement('canvas');
       if (element) { this.surface.id = element.id; this.surface.className = element.className; element.replaceWith(this.surface); }
-      this.presenter = new FrameSurfaceRenderer(this.surface);
+      // The launch poster is a separate 2D surface. Do not block its layout
+      // or native-session IPC on WebGL context creation and shader compilation.
+      this.presenter = null;
       this.videoWidth = 0; this.videoHeight = 0; this.duration = 0; this.readyState = 0; this.paused = true; this.seeking = false;
       this.time = 0; this.projectFps = 24; this._volume = 1; this._muted = false; this._speed = 1; this.callbacks = new Map(); this.nextCallback = 0;
       this.generation = 0; this.disposers = []; this.session = null; this.lastFrameId = -1; this.outputRevision = 0; this.outputTarget = null;
@@ -145,11 +147,20 @@
       pending.resolve(true);
       return false;
     }
+    ensurePresenter() {
+      if (!this.presenter) {
+        window.desktopAPI.startupMark?.('renderer.gpu-start');
+        try { this.presenter = new FrameSurfaceRenderer(this.surface); }
+        catch (error) { this.fail(error); throw error; }
+        finally { window.desktopAPI.startupMark?.('renderer.gpu-end'); }
+      }
+      return this.presenter;
+    }
     drawShared(frame, metadata = {}) {
       if (!this.acceptFrame(metadata)) return;
       if (this.finishSourceFrame(metadata, frame)) return;
       this.resize(frame.displayWidth, frame.displayHeight);
-      this.presenter.draw(frame);
+      this.ensurePresenter().draw(frame);
       this.markFrameRendered(metadata);
     }
     drawSoftware(frame) {
@@ -159,7 +170,7 @@
       if (!this.upload) this.upload = new SoftwareFrameUpload();
       this.upload.draw(frame);
       if (this.finishSourceFrame(frame, this.upload.canvas)) return;
-      this.presenter.draw(this.upload.canvas);
+      this.ensurePresenter().draw(this.upload.canvas);
       this.markFrameRendered(frame);
     }
     play() { this.stopReverse(); this.stepping = false; return this.call('play'); }
@@ -218,7 +229,7 @@
         for (const pending of this.sourceFrameRequests.values()) { clearTimeout(pending.timer); pending.reject(new Error('播放器已关闭')); }
         this.sourceFrameRequests.clear(); this.frameStates.clear(); this.renderedFrames.clear();
         if (this.session) await this.api.destroy(await this.session);
-        this.upload?.destroy(); this.presenter.destroy();
+        this.upload?.destroy(); this.presenter?.destroy();
       })();
       return this.destroyPromise;
     }

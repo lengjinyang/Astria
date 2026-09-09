@@ -202,6 +202,17 @@
                 <div class="settings-row"><span>打开后自动播放</span><button class="settings-switch on" id="autoplaySwitch" type="button" role="switch" aria-checked="true" title="打开视频后自动播放"><i></i></button></div>
                 <div class="settings-row"><span>记忆播放进度</span><button class="settings-switch on" id="rememberPlaybackPositionSwitch" type="button" role="switch" aria-checked="true" title="重新打开媒体时从上次位置继续"><i></i></button></div>
                 <label class="settings-row"><span>播放结束后</span><select id="endBehaviorSelect"><option value="stop">停在最后一帧</option><option value="rewind">返回第一帧</option><option value="loop">循环播放</option></select></label>
+                <div class="settings-row scrub-speed-settings-row">
+                  <label for="scrubSensitivity">画面拖动灵敏度</label>
+                  <output id="scrubSensitivityValue" for="scrubSensitivity">1.00× · 默认</output>
+                  <div class="scrub-sensitivity-slider"><span>慢</span><input id="scrubSensitivity" type="range" min="0" max="100" value="50" step="1" aria-describedby="scrubSensitivityHelp"><span>快</span></div>
+                  <div class="scrub-sensitivity-presets" role="group" aria-label="拖动灵敏度预设">
+                    <button type="button" data-scrub-sensitivity="0.15" aria-pressed="false">精细</button>
+                    <button type="button" data-scrub-sensitivity="0.3" aria-pressed="true" title="恢复默认灵敏度">标准（默认）</button>
+                    <button type="button" data-scrub-sensitivity="0.9" aria-pressed="false">快速</button>
+                  </div>
+                  <p id="scrubSensitivityHelp">左右拖动画面时生效，不改变播放速度。按住 Shift 可临时放慢至 1/5。</p>
+                </div>
                 <div class="settings-section-label">画面</div>
                 <div class="settings-row"><span>影院灯效</span><button class="settings-switch on" id="ambientSwitch" type="button" role="switch" aria-checked="true" aria-label="影院灯效"><i></i></button></div>
                 <div class="settings-row"><span>画面比例</span><div class="viewer-scale-control"><select id="viewerZoomSelect" aria-label="画面显示比例"><option value="fit">适应</option><option value="0.25">25%</option><option value="0.5">50%</option><option value="1">1:1</option><option value="2">200%</option><option value="custom" hidden>自定义</option></select><output id="viewerZoomValue">适应</output><button id="viewerFitBtn" title="复原为适应播放器大小" aria-label="复原画面大小">↺</button></div></div>
@@ -211,6 +222,8 @@
                 <details class="settings-advanced">
                 <summary>启动与系统</summary>
                 <label class="settings-row"><span>默认界面模式</span><select id="startupModeSelect"><option value="classic">经典模式</option><option value="clean" selected>纯净模式</option></select></label>
+                <label class="settings-row"><span>控件显示</span><select id="controlsVisibilitySelect"><option value="auto">自动隐藏</option><option value="always">始终显示</option></select></label>
+                <label class="settings-row"><span>切换视频时</span><select id="windowSizingSelect"><option value="fixed">保持窗口尺寸</option><option value="follow">窗口跟随视频比例</option></select></label>
                 <div class="settings-row"><span>系统关联</span><button class="settings-action-button" id="openDefaultAppsBtn">默认应用…</button></div>
                 </details>
               </div>
@@ -315,15 +328,6 @@
               <div><dt>实时自动保存</dt><dd><button type="button" class="switch on" id="autosaveSwitch" role="switch" aria-checked="true" aria-label="实时自动保存"><i></i></button></dd></div>
             </dl>
           </div>
-          <div class="property-group interaction-settings">
-            <h3>画面 Scrub</h3>
-            <label for="scrubSensitivity">
-              <span>拖动速度</span>
-              <output id="scrubSensitivityValue">0.30 帧/像素</output>
-            </label>
-            <input id="scrubSensitivity" type="range" min="0.05" max="3" value="0.3" step="0.05">
-            <div class="range-labels"><span>精细</span><span>快速</span></div>
-          </div>
           <button class="secondary-button" id="resetWorkspaceBtn">清空当前工作区</button>
         </section>
 
@@ -415,7 +419,7 @@
   </div>
   <div class="radial-dismiss-layer" id="radialDismissLayer" aria-hidden="true"></div>
   <div class="annotation-radial-menu" id="annotationRadialMenu" role="dialog" aria-label="批注工具" aria-hidden="true">
-    <div class="annotation-tools-heading"><span>批注工具</span><span class="annotation-tool-current"><b id="radialToolLabel">画笔</b><small id="annotationSizeLabel">4 px</small></span><button type="button" class="radial-center" title="关闭批注工具" aria-label="关闭批注工具"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div>
+    <div class="annotation-tools-heading"><span>批注工具</span><span class="annotation-tool-current"><b id="radialToolLabel">画笔</b></span><button type="button" class="radial-center" title="关闭批注工具 · Esc" aria-label="关闭批注工具"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div>
     <div class="radial-ring">
       <button class="radial-tool radial-select" data-quick-tool="select" title="浏览 / 画面 Scrub"><svg viewBox="0 0 24 24"><path d="M6 3l12 9-6 1.5L9 19z"/></svg></button>
       <button class="radial-tool radial-brush" data-quick-tool="brush" title="画笔"><svg viewBox="0 0 24 24"><path d="M4 17c4-6 7 4 10-2s4-7 6-10"/></svg></button>
@@ -426,13 +430,23 @@
       <button class="radial-tool radial-text" data-quick-tool="text" title="文字"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7V4h14v3M12 4v16M8 20h8"/></svg></button>
       <button class="radial-tool radial-eraser" data-quick-tool="eraser" title="橡皮擦"><svg viewBox="0 0 24 24"><path d="m7 16 8-8 4 4-7 7H8zM11 19h9"/></svg></button>
     </div>
+    <div class="annotation-color-row" role="group" aria-label="批注颜色">
+      <span>颜色</span>
+      <button type="button" data-annotation-color="#ffffff" style="--swatch: #ffffff" aria-label="白色" title="白色"></button>
+      <button type="button" data-annotation-color="#f87171" style="--swatch: #f87171" aria-label="红色" title="红色"></button>
+      <button type="button" data-annotation-color="#facc15" style="--swatch: #facc15" aria-label="黄色" title="黄色"></button>
+      <button type="button" data-annotation-color="#4ade80" style="--swatch: #4ade80" aria-label="绿色" title="绿色"></button>
+      <button type="button" data-annotation-color="#60a5fa" style="--swatch: #60a5fa" aria-label="蓝色" title="蓝色"></button>
+      <label class="radial-color" title="自定义颜色"><input id="radialAnnotationColor" type="color" value="#8b5cf6" aria-label="自定义批注颜色"><span></span><b>＋</b></label>
+    </div>
     <div class="radial-settings">
-      <label class="radial-color" title="批注颜色"><input id="radialAnnotationColor" type="color" value="#8b5cf6"><span></span></label>
+      <label for="annotationSizeRange">粗细</label>
       <button id="annotationSizeDown" title="减小粗细">−</button>
       <input id="annotationSizeRange" type="range" min="1" max="24" value="4" step="1" aria-label="批注粗细">
       <button id="annotationSizeUp" title="增大粗细">＋</button>
-      <button class="radial-clear" id="clearFrameAnnotations" title="清除此帧全部批注"><svg viewBox="0 0 24 24"><path d="m8 8 8 8m0-8-8 8M5 4h14v16H5z"/></svg></button>
+      <output id="annotationSizeLabel" for="annotationSizeRange">4 px</output>
     </div>
+    <div class="annotation-menu-footer"><span class="annotation-tool-hint" id="annotationToolHint" tabindex="0">右键拖动绘制</span><button type="button" id="clearFrameAnnotations" title="清除当前帧的全部批注，可撤销">清除此帧</button></div>
   </div>
   <div class="annotation-text-editor" id="annotationTextEditor" aria-hidden="true">
     <input id="annotationTextInput" maxlength="120" placeholder="输入批注文字，Enter 确认">

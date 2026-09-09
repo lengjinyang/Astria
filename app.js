@@ -7,6 +7,18 @@
   const WORKSPACES_KEY = 'vfx-player-media-workspaces-v02';
   const PREFERENCES_KEY = 'vfx-player-preferences-v02';
   const desktopAPI = window.desktopAPI || null;
+  desktopAPI?.startupMark?.('renderer.script-start');
+  // The native window owns the launch fade. Keep renderer pixels opaque so
+  // its backing surface is already complete before it becomes visible.
+  if (desktopAPI?.whenWindowShown && new URLSearchParams(location.search).get('launchMedia') === '1') {
+    document.body.classList.add('native-launch-pending');
+    void desktopAPI.whenWindowShown().then(() => {
+      // Remove any hidden-window entrance animation before releasing the guard.
+      clearMediaPresentationAnimation();
+      document.body.classList.remove('native-launch-pending');
+    }).catch(() => document.body.classList.remove('native-launch-pending'));
+  }
+
   let desktopData = null;
   const DEFAULT_SHORTCUTS = Object.freeze({
     togglePlay: 'Space', previousFrame: 'D', nextFrame: 'F', loopIn: 'I', loopOut: 'O', bookmark: 'M',
@@ -40,6 +52,12 @@
   };
 
   const playback = AstriaPlayback.create(els.video);
+  // Start IPC/native work before the rest of the synchronous UI setup. Do not
+  // apply replies until loadWorkspace/bindEvents have completed below.
+  const desktopBootstrap = beginDesktopBootstrap();
+  const startupAppData = desktopAPI ? desktopAPI.loadAppData().then(
+    value => ({ value }), error => ({ error })
+  ) : null;
   if (new URLSearchParams(location.search).has('smoke')) window.__astriaPlayback = playback;
   els.video = playback.surface;
   els.videoInput.accept = (desktopAPI ? AstriaFormats.selectable : AstriaFormats.browser).map(ext => '.' + ext).join(',');
@@ -58,7 +76,7 @@
     viewerZoomMode: 'fit', viewerZoom: 1, viewerPan: { x: 0, y: 0 }, viewerPanGesture: null,
     endBehavior: 'stop', panelOpen: false, viewerResizeObserver: null, viewerResizeRaf: null,
     playbackSpeed: 1, shortcuts: { ...DEFAULT_SHORTCUTS }, shortcutRecording: null, pixelInspector: false, timelineHoverPreview: true, timelineHoverPreviewSize: 196,
-    autoplayOnOpen: true, rememberPlaybackPosition: true, playbackPoster: '', playbackPosterDirty: false, mediaPosterPresented: false, currentWorkspaceReady: true, pendingResumePosition: null, resumeSeekPending: false, resumeTargetPosition: null, resumePositionAppliedAtOpen: false, resumeCorrectionRequested: false, resumePresentationTimer: null, startupMode: 'clean', startupModeApplied: false,
+    autoplayOnOpen: true, rememberPlaybackPosition: true, playbackPoster: '', playbackPosterDirty: false, mediaPosterPresented: false, currentWorkspaceReady: true, pendingResumePosition: null, resumeSeekPending: false, resumeTargetPosition: null, resumePositionAppliedAtOpen: false, resumeCorrectionRequested: false, resumePresentationTimer: null, startupMode: 'clean', startupModeApplied: false, controlsVisibility: 'auto', windowSizing: 'fixed', mediaWindowFittedGeneration: null,
 
     pixelInspectorLocked: false, pixelSample: null, pixelSampleCanvas: null,
     annotationThumbnails: {},
@@ -77,7 +95,8 @@
   const uid = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
   const frameDuration = () => 1 / Math.max(1, state.fps);
-  const totalFrames = () => playback.media?.mediaKind === 'sequence' ? playback.media.totalFrames : Math.max(1, Math.round((playback.duration || 0) * state.fps));
+  const displayDuration = () => state.mediaPosterPresented && state.mediaAwaitingFirstFrame ? Number(state.posterDuration) || 0 : playback.duration || 0;
+  const totalFrames = () => playback.media?.mediaKind === 'sequence' ? playback.media.totalFrames : Math.max(1, Math.round(displayDuration() * state.fps));
   const lastFrame = () => Math.max(0, totalFrames() - 1);
   const currentFrame = () => clamp(state.isReverse ? Math.round(state.reverseFrame) : Math.round(playback.currentTime * state.fps), 0, lastFrame());
   const frameSeekTime = frame => Math.min((clamp(Math.round(frame), 0, lastFrame()) + .25) / Math.max(1, state.fps), Math.max(0, playback.duration - .001));
@@ -169,12 +188,18 @@
     range.selectNodeContents(element); selection.removeAllRanges(); selection.addRange(range);
   }
 
-  function toast(message) {
+  function toast(message, action = null) {
     const node = document.createElement('div');
     node.className = 'toast'; node.textContent = message;
+    if (action) {
+      const button = document.createElement('button'); button.textContent = '撤销';
+      button.addEventListener('click', () => { action(); node.remove(); });
+      node.append(' ', button);
+    }
+    const lifetime = action ? 6500 : 2600;
     $('#toastStack').appendChild(node);
-    setTimeout(() => { node.style.opacity = '0'; node.style.translate = '10px 0'; }, 2600);
-    setTimeout(() => node.remove(), 2850);
+    setTimeout(() => { node.style.opacity = '0'; node.style.translate = '10px 0'; }, lifetime);
+    setTimeout(() => node.remove(), lifetime + 250);
   }
 
   function setStatus(message) { els.statusText.textContent = message; }
@@ -251,8 +276,9 @@
     renderShortcutEditor(); persistPreferences();
     toast(`快捷键已设置为 ${formatShortcut(shortcut)}`);
   }
-  function setMediaReady(ready) {
+  function setMediaReady(ready, interactive = ready) {
     if (!ready) resetAmbient();
+    $('.timeline-panel').inert = ready && !interactive;
     const topbar = $('.topbar');
     const shell = $('.app-shell');
     // During playback the header belongs to the window overlay, never its grid.
@@ -261,8 +287,8 @@
     document.body.classList.toggle('media-ready', ready);
     $$('.transport button, .transport input, .transport select, .annotation-toolbar button, .annotation-toolbar input, .luma-control button, #lumaContrast, #resetTimelineZoomBtn, #addBookmarkBtn, #cleanModeBtn, #pixelInspectorBtn, #exportAnnotatedFrameBtn').forEach(control => {
       const alwaysEnabled = ['togglePanelBtn','openDefaultAppsBtn','autoplaySwitch','rememberPlaybackPositionSwitch','startupModeSelect','hoverPreviewSwitch','previewSizeRange','previewSizeNumber','previewSizeDownBtn','previewSizeUpBtn','previewSizeResetBtn'].includes(control.id);
-      control.disabled = alwaysEnabled ? false : !ready;
-      control.setAttribute('aria-disabled', String(alwaysEnabled ? false : !ready));
+      control.disabled = alwaysEnabled ? false : !interactive;
+      control.setAttribute('aria-disabled', String(alwaysEnabled ? false : !interactive));
     });
   }
 
@@ -399,12 +425,12 @@
     clearTimeout(state.cleanControlsTimer);
     if (state.cleanMode && document.body.classList.contains('clean-pointer-outside')) return;
     if (!usesAutoHideControls()) return;
-    if (controlsAreHeld()) {
+    if (state.controlsVisibility === 'always' || controlsAreHeld()) {
       document.body.classList.add('clean-controls-visible');
       return;
     }
     state.cleanControlsTimer = setTimeout(() => {
-      if (usesAutoHideControls() && !controlsAreHeld()) {
+      if (usesAutoHideControls() && state.controlsVisibility !== 'always' && !controlsAreHeld()) {
         document.body.classList.remove('clean-controls-visible');
         hideTimelinePreview();
       }
@@ -418,26 +444,49 @@
     scheduleCleanControlsHide();
   }
 
+  let classicRevealTimer = null;
   let classicTopbarTimer = null;
+  let classicWindowExitTimer = null;
   let classicTopbarRaf = null;
   let classicTopbarPointer = null;
   let classicPointerInside = false;
   let classicWindowOutside = false;
-  const nativeClassicPointer = !!desktopAPI?.onTitlebarHover;
+  const nativeClassicPointer = !!desktopAPI?.onWindowPointer;
 
   function refreshClassicTopbar() {
-    const topbar = $('.topbar');
-    const held = topbar.matches(':has(details[open], .export-menu.open, :focus-visible)');
-    const visible = !state.cleanMode && !classicWindowOutside && (classicPointerInside || held);
-    if (visible || state.cleanMode || classicWindowOutside) {
-      clearTimeout(classicTopbarTimer); classicTopbarTimer = null;
-      document.body.classList.toggle('classic-topbar-visible', visible);
-    } else if (classicTopbarTimer === null) classicTopbarTimer = setTimeout(() => {
+    const pinned = state.controlsVisibility === 'always';
+    const held = heldTopbar();
+    const visible = document.body.classList.contains('classic-topbar-visible');
+    const cancelReveal = () => { clearTimeout(classicRevealTimer); classicRevealTimer = null; };
+    const cancelHide = () => { clearTimeout(classicTopbarTimer); classicTopbarTimer = null; };
+    if (state.cleanMode || (classicWindowOutside && !pinned)) {
+      cancelReveal(); cancelHide();
+      document.body.classList.remove('classic-topbar-visible');
+      return;
+    }
+    if (pinned || held) {
+      cancelReveal(); cancelHide();
+      document.body.classList.add('classic-topbar-visible');
+      return;
+    }
+    if (classicPointerInside) {
+      cancelHide();
+      if (!visible && classicRevealTimer === null) classicRevealTimer = setTimeout(() => {
+        classicRevealTimer = null;
+        if (classicPointerInside && !classicWindowOutside && !state.cleanMode &&
+            !document.querySelector('.modal-backdrop.open')) {
+          document.body.classList.add('classic-topbar-visible');
+        }
+      }, 90);
+      return;
+    }
+    cancelReveal();
+    if (visible && classicTopbarTimer === null) classicTopbarTimer = setTimeout(() => {
       classicTopbarTimer = null;
-      if (!classicPointerInside && !topbar.matches(':has(details[open], .export-menu.open, :focus-visible)')) {
+      if (!classicPointerInside && !heldTopbar() && state.controlsVisibility !== 'always') {
         document.body.classList.remove('classic-topbar-visible');
       }
-    }, 280);
+    }, 500);
   }
   function updateClassicTopbar(event) {
     // Native drag regions can synthesize DOM leave/enter without cursor movement.
@@ -445,18 +494,38 @@
     if (nativeClassicPointer && !event.nativePointer) return;
     const topbar = $('.topbar');
     const rect = topbar.getBoundingClientRect();
-    classicWindowOutside = false;
-    if (document.querySelector('.modal-backdrop.open') || event.target.closest?.('.modal-backdrop')) {
+    setClassicWindowPointer(true);
+    if (document.querySelector('.modal-backdrop.open') || event.target?.closest?.('.modal-backdrop')) {
       classicPointerInside = false;
       refreshClassicTopbar();
       return;
     }
     const revealed = document.body.classList.contains('classic-topbar-visible');
     // A wider exit boundary keeps the header stable around the reveal edge.
-    const triggerBottom = rect.top + (revealed ? Math.max(rect.height + 24, 64) : Math.max(rect.height, 36));
+    const triggerTop = document.body.classList.contains('media-ready') ? 0 : rect.top;
+    const triggerBottom = triggerTop + Math.max(topbar.offsetHeight, 36) + (revealed ? 8 : 0);
     classicPointerInside = (event.clientX >= rect.left && event.clientX <= rect.right &&
-      event.clientY >= rect.top && event.clientY <= triggerBottom) || (revealed && !!event.target.closest?.('.topbar'));
+      event.clientY >= triggerTop && event.clientY <= triggerBottom) || (revealed && !!event.target?.closest?.('.topbar'));
     refreshClassicTopbar();
+  }
+  function heldTopbar() { return $('.topbar').matches(':has(details[open], .export-menu.open, :focus-visible)'); }
+  function setClassicWindowPointer(inside) {
+    if (!inside) { clearTimeout(classicRevealTimer); classicRevealTimer = null; }
+    clearTimeout(classicWindowExitTimer);
+    classicWindowExitTimer = null;
+    if (inside) {
+      classicWindowOutside = false;
+      return;
+    }
+    // Crossing the frameless window edge can emit a very short leave/enter
+    // pair. Apply the same grace period as the topbar exit so a quick return
+    // does not produce hide/show animation flicker.
+    classicWindowExitTimer = setTimeout(() => {
+      classicWindowExitTimer = null;
+      classicWindowOutside = true;
+      classicPointerInside = false;
+      refreshClassicTopbar();
+    }, 500);
   }
   function scheduleClassicTopbarUpdate(event) {
     if (nativeClassicPointer) return;
@@ -480,20 +549,29 @@
     $('#exportBtn').setAttribute('aria-expanded', String(open));
   }
 
-  function fitVideoWindowToMedia(resizeWindow = true) {
-    if (!playback.videoWidth) return;
+  function fitMediaPresentation(dimensions = playback) {
+    const alreadyFitted = state.mediaWindowFittedGeneration === state.mediaLoadGeneration;
+    const resize = !alreadyFitted && (state.mediaWindowFittedGeneration === null || state.windowSizing === 'follow');
+    state.mediaWindowFittedGeneration = state.mediaLoadGeneration;
+    return fitVideoWindowToMedia(resize, !state.initialMediaPresentationSent, dimensions);
+  }
+
+  function fitVideoWindowToMedia(resizeWindow = true, initialCommit = false, dimensions = playback) {
+    if (!dimensions.videoWidth) return Promise.resolve(false);
     const sideInset = !state.cleanMode && state.panelOpen ? parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--panel-width')) || 340 : 0;
-    desktopAPI?.fitVideoWindow?.({ enabled: true, width: playback.videoWidth, height: playback.videoHeight,
-      bottomInset: state.cleanMode ? 0 : 44, sideInset, resizeWindow }).catch(() => {});
+    return desktopAPI?.fitVideoWindow?.({ enabled: true, width: dimensions.videoWidth, height: dimensions.videoHeight,
+      bottomInset: state.cleanMode ? 0 : 44, sideInset, resizeWindow, initialCommit }).catch(() => false) || Promise.resolve(false);
   }
 
   function setCleanMode(enabled, resizeWindow = true) {
     hideTimelinePreview();
-    if (enabled && !playback.duration) { toast('请先打开视频'); return; }
+    if (enabled && !playback.duration && !state.mediaPosterPresented) { toast('请先打开视频'); return; }
     if (state.cleanMode === enabled) return;
     state.cleanMode = enabled;
     if (resizeWindow) fitVideoWindowToMedia();
     clearTimeout(classicTopbarTimer); classicTopbarTimer = null;
+    clearTimeout(classicRevealTimer); classicRevealTimer = null;
+    clearTimeout(classicWindowExitTimer); classicWindowExitTimer = null;
     classicPointerInside = false;
     if (enabled) closeClassicTopbarMenus();
     clearTimeout(state.cleanControlsTimer);
@@ -525,7 +603,11 @@
       playback.currentTime = state.loopInFrame / state.fps;
     }
     updateMediaOutputTarget('viewport');
-    playback.play().catch(() => {});
+    playback.play().then(() => {
+      // mpv can remain unpaused across EOF. A loop seek then resumes video
+      // without another 'playing' event, so restore the stopped UI loop here.
+      if (!playback.paused && !state.isReverse && !state.playbackUiRaf) handlePlaybackPlaying();
+    }).catch(() => {});
   }
 
   function stopReverse() {
@@ -633,6 +715,7 @@
   }
 
   function keepPlayheadInView(ratio) {
+    if (state.timelineScrub || state.scrub || state.timelineSeek.inFlight || state.timelineSeek.pendingFrame !== null) return;
     if (state.timelineScrub) return;
     const viewportWidth = els.timelineWrap.clientWidth;
     const trackWidth = viewportWidth * Math.max(1, state.timelineZoom);
@@ -679,7 +762,7 @@
         state.playbackUiRaf = null;
         return;
       }
-      if (hasLoopRange() && playback.currentTime >= state.loopOutFrame / state.fps - frameDuration() * .25) {
+      if (!playback.seeking && hasLoopRange() && playback.currentTime >= state.loopOutFrame / state.fps - frameDuration() * .25) {
         playback.currentTime = state.loopInFrame / state.fps;
       }
       if (!document.body.classList.contains('window-interacting') && now - lastUiUpdate >= 32 && !state.timelineScrub && !state.scrub && !state.timelineSeek.inFlight) {
@@ -692,7 +775,7 @@
   }
 
   function updatePlaybackUI(time = playback.currentTime || 0, frame = Math.round(time * state.fps)) {
-    const t = time, duration = playback.duration || 0;
+    const t = time, duration = displayDuration();
     const missing = frameIsMissing(sourceFrame(frame));
     missingFrameNotice.hidden = !missing;
     missingFrameNotice.textContent = missing ? `缺失帧 ${sourceFrame(frame)}` : '';
@@ -883,12 +966,25 @@
     state.frameCacheHandle = playback.requestVideoFrameCallback(watchFrame);
   }
 
-  function announceInitialMediaPresented(immediate = false) {
-    if (state.initialMediaPresentationSent || !desktopAPI?.initialMediaPresented) return;
+  let initialPresentationTicket = 0;
+  function announceInitialMediaPresented(immediate = false, readiness = null) {
+    if (!desktopAPI?.initialMediaPresented) return;
+    // Errors must release the window even if an earlier layout promise stalled.
+    if (immediate) {
+      initialPresentationTicket += 1;
+      state.initialMediaPresentationSent = true;
+      desktopAPI.initialMediaPresented();
+      return;
+    }
+    if (state.initialMediaPresentationSent) return;
     state.initialMediaPresentationSent = true;
-    const announce = () => requestAnimationFrame(() => desktopAPI.initialMediaPresented());
-    if (!immediate && playback.requestVideoFrameCallback) playback.requestVideoFrameCallback(announce);
-    else announce();
+    const ticket = ++initialPresentationTicket;
+    let fallback;
+    const boundedReadiness = new Promise(resolve => { fallback = setTimeout(resolve, 1000); });
+    void Promise.race([Promise.resolve(readiness).catch(() => {}), boundedReadiness]).then(() => {
+      clearTimeout(fallback);
+      if (ticket === initialPresentationTicket) desktopAPI.initialMediaPresented();
+    });
   }
 
   function waitForMediaEvent(media, eventName, timeout = 4000) {
@@ -1066,8 +1162,11 @@
   }
 
   function clearLoopPoint(kind) {
+    if ((kind === 'in' ? state.loopInFrame : state.loopOutFrame) === null) return;
+    const entry = pushWorkspaceUndo('清除循环点');
+    offerUndo('已清除循环点', entry);
     if (kind === 'in') state.loopInFrame = null; else state.loopOutFrame = null;
-    renderLoopRange(); saveWorkspace(); toast(`${kind === 'in' ? 'A' : 'B'} 点已清除`);
+    renderLoopRange(); saveWorkspace();
   }
 
   function renderLoopRange() {
@@ -1139,6 +1238,7 @@
   function presentLoadedMediaFrame() {
     if (!state.mediaAwaitingFirstFrame || state.mediaAwaitingMetadata) return;
     const generation = state.mediaLoadGeneration;
+    desktopAPI?.startupMark?.('renderer.first-frame');
     const hadTransitionFrame = state.mediaReplacing;
     clearTimeout(state.resumePresentationTimer);
     state.resumePresentationTimer = null;
@@ -1169,16 +1269,40 @@
     startFrameCacheLoop();
     renderCompositionGuides();
     if (state.colorPreset !== 'original') scheduleColorRender();
-    fitVideoWindowToMedia();
+    const layoutReady = fitMediaPresentation().then(() =>
+      new Promise(resolve => requestAnimationFrame(() => {
+        if (generation === state.mediaLoadGeneration) {
+          // Window fitting changes the viewport after the first layout pass.
+          resetViewerView(false);
+          renderTimeline();
+          renderCompositionGuides();
+          updateUI(true);
+          // Do not reveal a cached poster on top of the ready playback frame.
+          if (!state.initialMediaPresentationSent) clearMediaTransitionFrame();
+        }
+        resolve();
+      })));
     updateUI(true);
-    captureFrame();
-    saveWorkspace();
-    if (state.autoplayOnOpen && !playback.reconfiguring) play();
+    const finishPresentation = () => deferNonCriticalWork(() => {
+      if (generation !== state.mediaLoadGeneration) return;
+      captureFrame();
+      saveWorkspace();
+    });
+    if (desktopAPI?.whenWindowShown) void desktopAPI.whenWindowShown().then(finishPresentation);
+    else finishPresentation();
+    if (state.autoplayOnOpen && !playback.reconfiguring) {
+      const startPlayback = () => {
+        if (generation === state.mediaLoadGeneration && !state.mediaAwaitingFirstFrame) play();
+      };
+      if (desktopAPI?.whenWindowShown) void desktopAPI.whenWindowShown().then(startPlayback);
+      else startPlayback();
+    }
     requestAnimationFrame(() => {
       if (generation !== state.mediaLoadGeneration) return;
       setStatus(playback.paused ? '视频已就绪' : '播放中');
       if (hadTransitionFrame) requestAnimationFrame(() => releaseMediaTransitionFrame(generation));
     });
+    return layoutReady;
   }
 
   function failMediaLoad() {
@@ -1214,11 +1338,12 @@
     } catch { /* poster caching must never interrupt playback */ }
   }
 
-  function showPlaybackPoster(source, generation) {
+  function showPlaybackPoster(source, generation, dimensions = null) {
     if (!source) return;
     const image = new Image();
     image.onload = () => {
       if (generation !== state.mediaLoadGeneration || !state.mediaAwaitingFirstFrame) return;
+      desktopAPI?.startupMark?.('renderer.poster-loaded');
       clearMediaTransitionFrame();
       const layoutPoster = () => {
         const stage = els.viewerStage.getBoundingClientRect();
@@ -1234,12 +1359,36 @@
       els.viewerStage.classList.add('has-video');
       state.mediaReplacing = true;
       state.mediaPosterPresented = true;
+      state.posterDuration = Number(dimensions?.mediaDuration) || 0;
+      // Apply the complete playback shell before showing the cached picture.
+      // Native readiness stays separate, so controls cannot act on an unopened file.
+      setMediaReady(true, false);
+      $('#hudResolution').textContent = `${Number(dimensions?.mediaWidth) || image.naturalWidth} × ${Number(dimensions?.mediaHeight) || image.naturalHeight}`;
+      $('#hudFps').textContent = `${Number(state.fps.toFixed(3))} FPS`;
+      renderRuler();
+      updatePlaybackUI(Number(state.pendingResumePosition) || 0);
       document.body.classList.remove('media-loading');
       els.viewerStage.removeAttribute('aria-busy');
       setStatus('正在准备播放');
-      announceInitialMediaPresented(true);
-      requestAnimationFrame(() => {
-        if (generation === state.mediaLoadGeneration && state.mediaPosterPresented) layoutPoster();
+      if (!state.startupModeApplied) {
+        state.startupModeApplied = true;
+        if (state.startupMode === 'clean') setCleanMode(true, false);
+      }
+      // Fit the complete shell before revealing it; decoding continues in parallel.
+      const layoutReady = fitMediaPresentation({
+        videoWidth: Number(dimensions?.mediaWidth) || image.naturalWidth,
+        videoHeight: Number(dimensions?.mediaHeight) || image.naturalHeight
+      });
+      void layoutReady.then(() => {
+        if (generation !== state.mediaLoadGeneration || !state.mediaPosterPresented) return;
+        requestAnimationFrame(() => {
+          if (generation !== state.mediaLoadGeneration || !state.mediaPosterPresented) return;
+          layoutPoster();
+          renderRuler();
+          updatePlaybackUI(Number(state.pendingResumePosition) || 0);
+          desktopAPI?.startupMark?.('renderer.poster-layout');
+          announceInitialMediaPresented(false);
+        });
       });
     };
     image.src = source;
@@ -1267,6 +1416,12 @@
 
   async function loadMediaSource(media, ownedObjectUrl = null) {
     if (!media?.url || !media?.name) { toast('请选择有效的视频文件'); return; }
+    const hasPrefetchedLaunchState = Object.prototype.hasOwnProperty.call(media, '_launchState');
+    const prefetchedLaunchState = hasPrefetchedLaunchState ? media._launchState : null;
+    if (hasPrefetchedLaunchState) {
+      media = { ...media };
+      delete media._launchState;
+    }
     if (typeof playback.ensureSession === 'function') void playback.ensureSession().catch(() => {});
     setStatus(`正在打开 · ${media.name}`);
     els.projectName.textContent = media.name;
@@ -1313,9 +1468,11 @@
     const workspaceApplyGate = new Promise(resolve => { releaseWorkspaceApply = resolve; });
     const activationOptions = { applyGate: workspaceApplyGate, skipLaunchState: false };
     const activationPromise = activateMediaWorkspace(state.fileMeta, generation, activationOptions).catch(() => false);
-    const launchState = desktopAPI?.loadMediaLaunchState && media.mediaId
-      ? await desktopAPI.loadMediaLaunchState(media.mediaId).catch(() => null)
-      : null;
+    const launchState = hasPrefetchedLaunchState
+      ? prefetchedLaunchState
+      : desktopAPI?.loadMediaLaunchState && media.mediaId
+        ? await desktopAPI.loadMediaLaunchState(media.mediaId).catch(() => null)
+        : null;
     if (generation !== state.mediaLoadGeneration) { releaseWorkspaceApply(); return; }
     if (launchState) {
       activationOptions.skipLaunchState = true;
@@ -1327,9 +1484,14 @@
       state.lastSavedPlaybackPosition = state.pendingResumePosition;
       state.playbackPoster = state.rememberPlaybackPosition && typeof launchState.playbackPoster === 'string' ? launchState.playbackPoster : '';
       state.playbackPosterDirty = false;
-      showPlaybackPoster(state.playbackPoster, generation);
+      showPlaybackPoster(state.playbackPoster, generation, launchState);
       openPlaybackAtRememberedPosition(media);
-      releaseWorkspaceApply();
+      // The compact launch state already supplies everything needed to open.
+      // Apply annotations/bookmarks after the first visible window to avoid
+      // competing with its layout and compositor submission.
+      if (!state.initialMediaPresentationSent && desktopAPI?.whenWindowShown) {
+        void desktopAPI.whenWindowShown().then(releaseWorkspaceApply);
+      } else releaseWorkspaceApply();
       void activationPromise;
       return;
     }
@@ -1429,14 +1591,14 @@
         state.resumeCorrectionRequested = true;
         playback.currentTime = state.resumeTargetPosition;
       }
-      clearTimeout(state.resumePresentationTimer);
-      state.resumePresentationTimer = setTimeout(() => {
+      if (state.resumePresentationTimer === null) state.resumePresentationTimer = setTimeout(() => {
+        state.resumePresentationTimer = null;
         if (generation !== state.mediaLoadGeneration || !state.resumeSeekPending) return;
         state.resumeSeekPending = false;
         state.resumeTargetPosition = null;
         state.resumeCorrectionRequested = false;
-        announceInitialMediaPresented();
-        presentLoadedMediaFrame();
+        const layoutReady = presentLoadedMediaFrame();
+        announceInitialMediaPresented(false, layoutReady);
       }, 700);
       return false;
     }
@@ -1633,15 +1795,37 @@
     if (state.panelOpen) requestAnimationFrame(() => $(`.bookmark-card[data-id="${id}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest', container: 'nearest' }));
   }
 
+  function pushWorkspaceUndo(label) {
+    const bookmarkOnly = label === '删除书签', annotationOnly = label === '删除批注', loopOnly = label === '清除循环点';
+    const entry = { label, workspace: structuredClone({
+      bookmarks: annotationOnly || loopOnly ? [] : state.bookmarks,
+      annotations: bookmarkOnly || loopOnly ? [] : state.annotations,
+      annotationThumbnails: bookmarkOnly || loopOnly ? {} : state.annotationThumbnails,
+      loopInFrame: bookmarkOnly || annotationOnly ? null : state.loopInFrame,
+      loopOutFrame: bookmarkOnly || annotationOnly ? null : state.loopOutFrame
+    }) };
+    state.annotationUndo.push(entry);
+    if (state.annotationUndo.length > 30) state.annotationUndo.shift();
+    return entry;
+  }
+  function offerUndo(label, entry) {
+    toast(`${label} · Ctrl+Z 可撤销`, () => {
+      if (state.annotationUndo.at(-1) === entry) undoAnnotation();
+      else toast('请使用 Ctrl+Z 按操作顺序撤销');
+    });
+  }
   function deleteSelection() {
     if (state.selectedAnnotationFrame !== null) {
+      const entry = pushWorkspaceUndo('删除批注'); offerUndo('已删除批注', entry);
+      delete state.annotationThumbnails[state.selectedAnnotationFrame];
       state.annotations = state.annotations.filter(annotation => annotation.frame !== state.selectedAnnotationFrame);
       state.selectedAnnotationId = null; state.selectedAnnotationFrame = null; renderAnnotationList(); renderTimeline(); drawAnnotations(); updateCounts(); saveWorkspace(); return;
     }
     if (!state.selectedBookmarkIds.length) return;
     const count = state.selectedBookmarkIds.length;
+    const entry = pushWorkspaceUndo('删除书签');
     state.bookmarks = state.bookmarks.filter(b => !state.selectedBookmarkIds.includes(b.id));
-    state.selectedBookmarkIds = []; renderBookmarks(); renderTimeline(); syncNotes(); saveWorkspace(); toast(`已删除 ${count} 个书签`);
+    state.selectedBookmarkIds = []; renderBookmarks(); renderTimeline(); syncNotes(); saveWorkspace(); updateCounts(); offerUndo(`已删除 ${count} 个书签`, entry);
   }
 
   function renderBookmarks() {
@@ -1772,7 +1956,7 @@
 
   function renderRuler() {
     els.ruler.innerHTML = '';
-    const duration = playback.duration || 0;
+    const duration = displayDuration();
     if (!duration) return;
     const labels = Math.min(14, Math.max(5, Math.floor(els.ruler.clientWidth / 110)));
     for (let i = 0; i <= labels; i++) {
@@ -1843,18 +2027,37 @@
       }
     });
     $('#radialToolLabel').textContent = quickToolName(tool);
+    const drawing = !['select', 'eraser'].includes(tool);
+    els.radialMenu.dataset.tool = tool;
+    $$('.annotation-color-row button,.annotation-color-row input,.radial-settings button,.radial-settings input').forEach(control => { control.disabled = !drawing; });
+    $('#annotationToolHint').textContent = ({select:'右键拖动浏览',eraser:'右键划过擦除',text:'右键轻拖添加文字'})[tool] || '右键拖动绘制';
+    $('#annotationToolHint').title = ({
+      select: '按住右键左右拖动浏览画面；Shift 临时擦除。',
+      eraser: '按住右键划过批注即可擦除；Ctrl+Z 撤销。',
+      text: '在画面上右键轻拖后输入文字，Enter 确认。'
+    })[tool] || '按住右键拖动绘制；Shift 临时擦除，Alt 临时画箭头。';
     if (showNotice) toast(`右键快速工具：${quickToolName(tool)}`);
   }
 
   function updateAnnotationSizeLabel() {
     $('#annotationSizeLabel').textContent = `${state.annotationSize} px`;
     els.annotationSizeRange.value = state.annotationSize;
+    $('#annotationSizeDown').disabled = ['select','eraser'].includes(state.quickAnnotationTool) || state.annotationSize <= 1;
+    $('#annotationSizeUp').disabled = ['select','eraser'].includes(state.quickAnnotationTool) || state.annotationSize >= 24;
+  }
+
+  function syncAnnotationColor() {
+    $('#radialAnnotationColor').value = state.annotationColor;
+    document.documentElement.style.setProperty('--annotation-color', state.annotationColor);
+    $$('[data-annotation-color]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.annotationColor.toLowerCase() === state.annotationColor.toLowerCase())));
   }
 
   function showAnnotationRadialMenu(clientX, clientY) {
     if (!playback.duration || state.cleanMode) return;
     setQuickAnnotationTool(state.quickAnnotationTool, false);
     updateAnnotationSizeLabel();
+    syncAnnotationColor();
+    $('#clearFrameAnnotations').disabled = !state.annotations.some(annotation => annotation.frame === currentFrame());
     els.radialMenu.classList.add('open');
     const rect = els.radialMenu.getBoundingClientRect();
     els.radialMenu.style.left = `${clamp(clientX + 8, 8, Math.max(8, innerWidth - rect.width - 8))}px`;
@@ -1972,7 +2175,7 @@
     const gesture = state.quickGesture;
     if (!gesture || e.pointerId !== gesture.pointerId) return;
     state.quickGesture = null;
-    if (!gesture.drawing) { showAnnotationRadialMenu(e.clientX, e.clientY); return; }
+    if (!gesture.drawing) { if (!gesture.dismissOnly) showAnnotationRadialMenu(e.clientX, e.clientY); return; }
     if (gesture.tool === 'select') { updateUI(true); releaseResponsiveSeekDisplay(); return; }
     if (gesture.tool === 'eraser') {
       if (gesture.erasedCount) { refreshAnnotationUI(); toast(`已擦除 ${gesture.erasedCount} 个批注内容`); }
@@ -1995,8 +2198,8 @@
     const frame = currentFrame();
     const current = annotationsAt(frame);
     const annotations = typeof structuredClone === 'function' ? structuredClone(current) : JSON.parse(JSON.stringify(current));
-    state.annotationUndo.push({ frame, annotations });
-    if (state.annotationUndo.length > 50) state.annotationUndo.shift();
+    state.annotationUndo.push({ frame, annotations, thumbnail: state.annotationThumbnails[frame] });
+    if (state.annotationUndo.length > 30) state.annotationUndo.shift();
   }
 
   function refreshAnnotationUI() {
@@ -2057,8 +2260,25 @@
 
   function undoAnnotation() {
     const previous = state.annotationUndo.pop();
-    if (!previous) { toast('没有可撤销的批注操作'); return; }
+    if (!previous) { toast('没有可撤销的操作'); return; }
+    if (previous.workspace) {
+      // Restore removed content without overwriting edits/additions made since
+      // deletion (e.g. typing a new note before choosing Undo).
+      const saved = previous.workspace;
+      const bookmarkIds = new Set(state.bookmarks.map(item => item.id));
+      const annotationIds = new Set(state.annotations.map(item => item.id));
+      state.bookmarks.push(...saved.bookmarks.filter(item => !bookmarkIds.has(item.id)));
+      state.annotations.push(...saved.annotations.filter(item => !annotationIds.has(item.id)));
+      state.annotationThumbnails = { ...saved.annotationThumbnails, ...state.annotationThumbnails };
+      if (state.loopInFrame === null) state.loopInFrame = saved.loopInFrame;
+      if (state.loopOutFrame === null) state.loopOutFrame = saved.loopOutFrame;
+      state.selectedBookmarkIds = []; state.selectedAnnotationId = null; state.selectedAnnotationFrame = null;
+      renderBookmarks(); renderTimeline(); renderAnnotationList(); drawAnnotations(); syncNotes(); updateCounts(); saveWorkspace(true);
+      toast(`已撤销${previous.label}`); return;
+    }
     state.annotations = state.annotations.filter(annotation => annotation.frame !== previous.frame).concat(previous.annotations);
+    if (previous.thumbnail) state.annotationThumbnails[previous.frame] = previous.thumbnail;
+    else delete state.annotationThumbnails[previous.frame];
     state.selectedAnnotationId = null; state.selectedAnnotationFrame = null;
     refreshAnnotationUI(); toast('已撤销批注操作');
   }
@@ -2129,7 +2349,7 @@
       row.addEventListener('click', jump);
       $('.jump-annotation-btn',row).addEventListener('click', e => { e.stopPropagation(); jump(); });
       $('.visibility-btn',row).addEventListener('click', e => { e.stopPropagation(); annotations.forEach(annotation => annotation.hidden = !allHidden); renderAnnotationList(); drawAnnotations(); saveWorkspace(); });
-      $('.delete-btn',row).addEventListener('click', e => { e.stopPropagation(); state.annotations=state.annotations.filter(annotation=>annotation.frame!==frame); delete state.annotationThumbnails[frame]; if(state.selectedAnnotationFrame===frame){state.selectedAnnotationId=null;state.selectedAnnotationFrame=null;} renderAnnotationList(); renderTimeline(); drawAnnotations(); updateCounts(); saveWorkspace(); });
+      $('.delete-btn',row).addEventListener('click', e => { e.stopPropagation(); const entry=pushWorkspaceUndo('删除批注');offerUndo('已删除批注',entry); state.annotations=state.annotations.filter(annotation=>annotation.frame!==frame); delete state.annotationThumbnails[frame]; if(state.selectedAnnotationFrame===frame){state.selectedAnnotationId=null;state.selectedAnnotationFrame=null;} renderAnnotationList(); renderTimeline(); drawAnnotations(); updateCounts(); saveWorkspace(); });
       fragment.appendChild(row);
     });
     els.annotationList.appendChild(fragment);
@@ -2144,7 +2364,7 @@
   }
 
   function workspaceData() {
-    return { version: '0.8', mediaKind: state.fileMeta?.mediaKind || 'video', sourceFrameOffset: state.fileMeta?.sourceFrameOffset || 0, sequence: state.fileMeta?.sequence || null, fileMeta: state.fileMeta, fps: state.fps, fpsMode: state.fpsMode, fpsModeExplicit: state.fpsModeExplicit, bookmarks: state.bookmarks, annotations: state.annotations, annotationThumbnails: state.annotationThumbnails, timelineZoom: state.timelineZoom, loopInFrame: state.loopInFrame, loopOutFrame: state.loopOutFrame, colorPreset: state.colorPreset, playbackPosition: state.rememberPlaybackPosition ? rememberedPlaybackPosition() : null, playbackPoster: state.rememberPlaybackPosition ? state.playbackPoster : '', updatedAt: new Date().toISOString() };
+    return { version: '0.8', mediaDuration: playback.duration || 0, mediaWidth: playback.videoWidth || 0, mediaHeight: playback.videoHeight || 0, mediaKind: state.fileMeta?.mediaKind || 'video', sourceFrameOffset: state.fileMeta?.sourceFrameOffset || 0, sequence: state.fileMeta?.sequence || null, fileMeta: state.fileMeta, fps: state.fps, fpsMode: state.fpsMode, fpsModeExplicit: state.fpsModeExplicit, bookmarks: state.bookmarks, annotations: state.annotations, annotationThumbnails: state.annotationThumbnails, timelineZoom: state.timelineZoom, loopInFrame: state.loopInFrame, loopOutFrame: state.loopOutFrame, colorPreset: state.colorPreset, playbackPosition: state.rememberPlaybackPosition ? rememberedPlaybackPosition() : null, playbackPoster: state.rememberPlaybackPosition ? state.playbackPoster : '', updatedAt: new Date().toISOString() };
   }
 
   function legacyMediaKey(meta) {
@@ -2167,7 +2387,7 @@
   }
 
   function preferenceData() {
-    return { ambientEnabled: ambient.enabled, autosave: state.autosave, viewerScrubSensitivity: state.viewerScrubSensitivity, lumaMode: state.lumaMode, lumaContrast: state.lumaContrast, volume: state.volume, muted: state.muted, annotationSize: state.annotationSize, annotationColor: state.annotationColor, quickAnnotationTool: state.quickAnnotationTool, endBehavior: state.endBehavior, playbackSpeed: state.playbackSpeed, autoplayOnOpen: state.autoplayOnOpen, rememberPlaybackPosition: state.rememberPlaybackPosition, startupMode: state.startupMode, timelineHoverPreview: state.timelineHoverPreview, timelineHoverPreviewSize: state.timelineHoverPreviewSize, guidesMaster: state.guidesMaster, guideThirds: state.guideThirds, guideGolden: state.guideGolden, guideSpiral: state.guideSpiral, guideSpiralRotation: state.guideSpiralRotation, guideCenter: state.guideCenter, guideDiagonal: state.guideDiagonal, guideTriangle: state.guideTriangle, guideSymmetry: state.guideSymmetry, guideActionSafe: state.guideActionSafe, guideTitleSafe: state.guideTitleSafe, guideAspect: state.guideAspect, guideOpacity: state.guideOpacity, guideMaskStrength: state.guideMaskStrength, shortcuts: state.shortcuts };
+    return { ambientEnabled: ambient.enabled, autosave: state.autosave, viewerScrubSensitivity: state.viewerScrubSensitivity, lumaMode: state.lumaMode, lumaContrast: state.lumaContrast, volume: state.volume, muted: state.muted, annotationSize: state.annotationSize, annotationColor: state.annotationColor, quickAnnotationTool: state.quickAnnotationTool, endBehavior: state.endBehavior, playbackSpeed: state.playbackSpeed, autoplayOnOpen: state.autoplayOnOpen, rememberPlaybackPosition: state.rememberPlaybackPosition, startupMode: state.startupMode, controlsVisibility: state.controlsVisibility, windowSizing: state.windowSizing, timelineHoverPreview: state.timelineHoverPreview, timelineHoverPreviewSize: state.timelineHoverPreviewSize, guidesMaster: state.guidesMaster, guideThirds: state.guideThirds, guideGolden: state.guideGolden, guideSpiral: state.guideSpiral, guideSpiralRotation: state.guideSpiralRotation, guideCenter: state.guideCenter, guideDiagonal: state.guideDiagonal, guideTriangle: state.guideTriangle, guideSymmetry: state.guideSymmetry, guideActionSafe: state.guideActionSafe, guideTitleSafe: state.guideTitleSafe, guideAspect: state.guideAspect, guideOpacity: state.guideOpacity, guideMaskStrength: state.guideMaskStrength, shortcuts: state.shortcuts };
   }
 
   function persistPreferences() {
@@ -2192,6 +2412,9 @@
     return {
       ...saved,
       version: saved.version || '0.8',
+      mediaDuration: playback.duration || saved.mediaDuration || 0,
+      mediaWidth: playback.videoWidth || saved.mediaWidth || 0,
+      mediaHeight: playback.videoHeight || saved.mediaHeight || 0,
       mediaKind: saved.mediaKind || state.fileMeta?.mediaKind || 'video',
       sourceFrameOffset: saved.sourceFrameOffset ?? state.fileMeta?.sourceFrameOffset ?? 0,
       sequence: saved.sequence ?? state.fileMeta?.sequence ?? null,
@@ -2366,6 +2589,18 @@
     }, manual ? 0 : 180);
   }
 
+  function syncScrubSensitivityControl() {
+    const sensitivity = state.viewerScrubSensitivity;
+    const isDefault = Math.abs(sensitivity - .3) < .000001;
+    const multiplier = `${(sensitivity / .3).toFixed(2)}×`;
+    els.scrubSensitivity.value = 50 + 50 * Math.log(sensitivity / .3) / Math.log(sensitivity <= .3 ? 6 : 10);
+    els.scrubSensitivityValue.textContent = `${multiplier}${isDefault ? ' · 默认' : ''}`;
+    els.scrubSensitivity.setAttribute('aria-valuetext', `默认灵敏度的 ${multiplier}${isDefault ? '，默认' : ''}`);
+    document.querySelectorAll('[data-scrub-sensitivity]').forEach(button=>{
+      button.setAttribute('aria-pressed', String(Math.abs(sensitivity - Number(button.dataset.scrubSensitivity)) < .000001));
+    });
+  }
+
   async function loadWorkspace() {
     try {
       let legacy = null;
@@ -2373,7 +2608,9 @@
       let browserWorkspaces = {};
       if (desktopAPI) {
         let legacyWorkspaceMigrated = false;
-        const saved = await desktopAPI.loadAppData();
+        const prefetched = await startupAppData;
+        if (prefetched.error) throw prefetched.error;
+        const saved = prefetched.value;
         const hasDesktopPreferences = saved?.preferences && Object.keys(saved.preferences).length > 0;
         if (!hasDesktopPreferences) {
           legacy = JSON.parse(localStorage.getItem(STORAGE_KEY));
@@ -2417,6 +2654,8 @@
       state.autoplayOnOpen = preferences.autoplayOnOpen !== false;
       state.rememberPlaybackPosition = preferences.rememberPlaybackPosition !== false;
       state.startupMode = preferences.startupMode === 'classic' ? 'classic' : 'clean';
+      state.controlsVisibility = preferences.controlsVisibility === 'always' ? 'always' : 'auto';
+      state.windowSizing = preferences.windowSizing === 'follow' ? 'follow' : 'fixed';
       state.timelineHoverPreview = preferences.timelineHoverPreview !== false;
       state.timelineHoverPreviewSize = clamp(Math.round((Number(preferences.timelineHoverPreviewSize) || 196) / 2) * 2, 140, 320);
       state.guidesMaster = preferences.guidesMaster !== false;
@@ -2439,8 +2678,7 @@
       state.fileMeta = null; state.fileName = ''; state.currentMediaKey = null; state.sourcePath = null;
       state.bookmarks = []; state.annotations = []; state.selectedBookmarkIds = [];
       els.fpsInput.value = state.fps;
-      els.scrubSensitivity.value = state.viewerScrubSensitivity;
-      els.scrubSensitivityValue.textContent = `${state.viewerScrubSensitivity.toFixed(2)} 帧/像素`;
+      syncScrubSensitivityControl();
       els.lumaContrast.value = Math.round(state.lumaContrast * 100);
       els.lumaContrastValue.textContent = `${Math.round(state.lumaContrast * 100)}%`;
       $('#radialAnnotationColor').value = state.annotationColor;
@@ -2460,6 +2698,8 @@
       $('#rememberPlaybackPositionSwitch').classList.toggle('on', state.rememberPlaybackPosition);
       $('#rememberPlaybackPositionSwitch').setAttribute('aria-checked', String(state.rememberPlaybackPosition));
       $('#startupModeSelect').value = state.startupMode;
+      $('#controlsVisibilitySelect').value = state.controlsVisibility;
+      $('#windowSizingSelect').value = state.windowSizing;
       $('#guideThirds').checked=state.guideThirds;$('#guideGolden').checked=state.guideGolden;$('#guideSpiral').checked=state.guideSpiral;$('#guideSpiralRotation').value=String(state.guideSpiralRotation);$('#guideCenter').checked=state.guideCenter;$('#guideDiagonal').checked=state.guideDiagonal;$('#guideTriangle').checked=state.guideTriangle;$('#guideSymmetry').checked=state.guideSymmetry;$('#guideActionSafe').checked=state.guideActionSafe;$('#guideTitleSafe').checked=state.guideTitleSafe;$('#guideAspect').value=state.guideAspect;$('#guideOpacity').value=Math.round(state.guideOpacity*100);$('#guideMaskStrength').value=Math.round(state.guideMaskStrength*100);renderCompositionGuides();
       $('#hoverPreviewSwitch').classList.toggle('on', state.timelineHoverPreview);
       $('#hoverPreviewSwitch').setAttribute('aria-checked', String(state.timelineHoverPreview));
@@ -2582,15 +2822,22 @@
   }
 
   function beginDesktopBootstrap() {
+    desktopAPI?.startupMark?.('renderer.bootstrap');
     if (!desktopAPI) return null;
     const versionPromise = desktopAPI.getVersion().catch(() => '0.8.7');
     const windowStatePromise = desktopAPI.getWindowState().catch(() => null);
+    const hasLaunchMedia = new URLSearchParams(window.location.search).get('launchMedia') === '1';
+    // A file-association launch can initialize libmpv and the shared-texture
+    // device while the main process resolves the media descriptor.
+    if (hasLaunchMedia && typeof playback.ensureSession === 'function') void playback.ensureSession().catch(() => {});
     const launchMediaPromise = desktopAPI.consumeLaunchMedia().catch(() => null);
-    // Only pay native player startup cost when this launch actually has media.
-    void launchMediaPromise.then(media => {
-      if (media && typeof playback.ensureSession === 'function') return playback.ensureSession().catch(() => {});
-      return null;
-    });
+    if (!hasLaunchMedia) {
+      // Keep ordinary start-screen launches lightweight when no file was supplied.
+      void launchMediaPromise.then(media => {
+        if (media && typeof playback.ensureSession === 'function') return playback.ensureSession().catch(() => {});
+        return null;
+      });
+    }
     return { versionPromise, windowStatePromise, launchMediaPromise };
   }
 
@@ -2622,8 +2869,8 @@
         void refreshRecentVideos();
       }
     });
-    // Geometry and visible labels belong to the first complete paint. Media
-    // probing/decoding continues independently and must not delay the window.
+    // Normal launches reveal this first complete paint immediately. A cold
+    // media launch is held by the main process until its playback layout commits.
     await Promise.all([applyVersion, applyWindowState]);
   }
 
@@ -2732,6 +2979,7 @@
   }
 
   function updateTimelineTooltip(e) {
+    if (state.timelineScrub || state.scrub || state.timelineSeek.inFlight) { hideTimelinePreview(); return; }
     if (!playback.duration || !state.timelineHoverPreview) {
       hideTimelinePreview();
       return;
@@ -2757,6 +3005,7 @@
 
   function queueResponsiveSeek(frame) {
     const targetFrame = clamp(Math.round(frame), 0, lastFrame());
+    hideTimelinePreview();
     if (!state.timelineSeek.displayGate) showPlaybackFrameOverlay();
     state.timelineSeek.pendingFrame = targetFrame;
     updatePlaybackUI(targetFrame / state.fps, targetFrame);
@@ -2815,8 +3064,9 @@
   function beginTimelineScrub(e) {
     if (!playback.duration || e.button !== 0 || e.target.closest('.timeline-marker, .annotation-timeline-marker')) return;
     e.preventDefault();
-    const wasPlaying = !playback.paused && !state.isReverse;
-    const wasReverse = state.isReverse;
+    const wasPlaying = state.timelineSeek.resumeAfterSeek === 'play' || (!playback.paused && !state.isReverse);
+    const wasReverse = state.isReverse || state.timelineSeek.resumeAfterSeek === 'reverse';
+    state.timelineSeek.resumeAfterSeek = null;
     pause();
     state.timelineScrub = { pointerId: e.pointerId, lastFrame: null, wasPlaying, wasReverse };
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -2861,7 +3111,8 @@
     }
     if (e.target.closest('.clean-window-controls')) return;
     if (!playback.duration || e.button !== 0) return;
-    state.scrub={pointerId:e.pointerId,startX:e.clientX,startY:e.clientY,startFrame:currentFrame(),lastFrame:currentFrame(),dragging:false,wasPlaying:!playback.paused && !state.isReverse,wasReverse:state.isReverse};
+    state.scrub={pointerId:e.pointerId,startX:e.clientX,startY:e.clientY,startFrame:currentFrame(),lastFrame:currentFrame(),dragging:false,wasPlaying:state.timelineSeek.resumeAfterSeek==='play'||(!playback.paused && !state.isReverse),wasReverse:state.isReverse||state.timelineSeek.resumeAfterSeek==='reverse'};
+    state.timelineSeek.resumeAfterSeek=null;
     els.viewerStage.setPointerCapture(e.pointerId);
   }
 
@@ -3103,6 +3354,16 @@
     finally{media.destroy();state.contactSheetBusy=false;$('#generateContactSheetBtn').disabled=false;$('#cancelContactGenerationBtn').hidden=true;$('#cancelContactGenerationBtn').textContent='取消生成';$('#closeContactSheetFooterBtn').disabled=false;$('#contactProgress').hidden=true;if(closeWhenDone)closeContactSheet();}
   }
 
+  function handlePlaybackPlaying() {
+    state.timelineSeek.displayGate = false;
+    state.timelineSeek.displayFrame = null;
+    hideCachedFrame();
+    els.playBtn.classList.add('playing');
+    setStatus('播放中');
+    startPlaybackUiLoop();
+    revealCleanControls();
+  }
+
   function handlePlaybackEnded() {
     els.playBtn.classList.remove('playing');
     stopPlaybackUiLoop();
@@ -3170,9 +3431,9 @@
     });
     playback.addEventListener('metadata',onMetadata);
     playback.addEventListener('error',()=>{failMediaLoad();announceInitialMediaPresented(true);setStatus('视频载入失败');toast(playback.error?.message || '无法播放此视频，请检查编码格式');});
-    playback.addEventListener('frame',event=>{if(!acceptResumeFrame(event))return;announceInitialMediaPresented();presentLoadedMediaFrame();schedulePlaybackPositionSave();if(playback.paused&&!state.timelineScrub&&!state.scrub&&!state.timelineSeek.inFlight)updateUI();if(!playback.requestVideoFrameCallback){captureFrame();scheduleColorRender();}});
+    playback.addEventListener('frame',event=>{if(!acceptResumeFrame(event))return;const layoutReady=presentLoadedMediaFrame();announceInitialMediaPresented(false,layoutReady);schedulePlaybackPositionSave();if(playback.paused&&!state.timelineScrub&&!state.scrub&&!state.timelineSeek.inFlight)updateUI();if(!playback.requestVideoFrameCallback){captureFrame();scheduleColorRender();}});
     playback.addEventListener('frame',event=>{if(event.detail?.seeked)onResponsiveSeeked();});
-    playback.addEventListener('playing',()=>{state.timelineSeek.displayGate=false;state.timelineSeek.displayFrame=null;hideCachedFrame();els.playBtn.classList.add('playing');setStatus('播放中');startPlaybackUiLoop();revealCleanControls();});
+    playback.addEventListener('playing',handlePlaybackPlaying);
     playback.addEventListener('paused',()=>{
       els.playBtn.classList.remove('playing'); stopPlaybackUiLoop();
       if (!state.isReverse) setStatus('已暂停');
@@ -3223,6 +3484,14 @@
       }
       persistPreferences();
       toast(state.rememberPlaybackPosition ? '将记住每个媒体的播放进度' : '已关闭播放进度记忆');
+    });
+    $('#controlsVisibilitySelect').addEventListener('change', e => {
+      state.controlsVisibility = e.target.value === 'always' ? 'always' : 'auto';
+      document.body.classList.remove('clean-pointer-outside');
+      refreshClassicTopbar(); revealCleanControls(); persistPreferences();
+    });
+    $('#windowSizingSelect').addEventListener('change', e => {
+      state.windowSizing = e.target.value === 'follow' ? 'follow' : 'fixed'; persistPreferences();
     });
     $('#startupModeSelect').addEventListener('change',e=>{
       state.startupMode = e.target.value === 'clean' ? 'clean' : 'classic';
@@ -3323,15 +3592,24 @@
     els.viewerStage.addEventListener('wheel',handleViewerWheel,{passive:false});
     els.viewerStage.addEventListener('pointermove',inspectPixel);
     els.viewerStage.addEventListener('pointerleave',()=>{if(!state.pixelInspectorLocked)els.pixelInspectorHud.classList.remove('show');});
-    $$('[data-quick-tool]').forEach(button=>button.addEventListener('click',e=>{e.stopPropagation();setQuickAnnotationTool(button.dataset.quickTool);hideAnnotationRadialMenu();}));
-    $('#radialAnnotationColor').addEventListener('input',e=>{state.annotationColor=e.target.value;document.documentElement.style.setProperty('--annotation-color',e.target.value);});
+    $$('[data-quick-tool]').forEach(button=>button.addEventListener('click',e=>{e.stopPropagation();setQuickAnnotationTool(button.dataset.quickTool,false);updateAnnotationSizeLabel();persistPreferences();}));
+    $('#radialAnnotationColor').addEventListener('input',e=>{state.annotationColor=e.target.value;syncAnnotationColor();});
     $('#radialAnnotationColor').addEventListener('change',()=>persistPreferences());
     els.annotationSizeRange.addEventListener('input',e=>{state.annotationSize=Number(e.target.value);updateAnnotationSizeLabel();persistPreferences();});
     $('#annotationSizeDown').addEventListener('click',e=>{e.stopPropagation();adjustAnnotationSize(-1);});
     $('#annotationSizeUp').addEventListener('click',e=>{e.stopPropagation();adjustAnnotationSize(1);});
-    els.radialMenu.addEventListener('wheel',e=>{e.preventDefault();adjustAnnotationSize(e.deltaY<0?1:-1);},{passive:false});
-    $('#clearFrameAnnotations').addEventListener('click',e=>{e.stopPropagation();const frame=currentFrame();const count=state.annotations.filter(a=>a.frame===frame).length;if(!count)return;pushAnnotationUndo();state.annotations=state.annotations.filter(a=>a.frame!==frame);delete state.annotationThumbnails[frame];if(state.selectedAnnotationFrame===frame){state.selectedAnnotationId=null;state.selectedAnnotationFrame=null;}hideAnnotationRadialMenu();refreshAnnotationUI();toast(`已清除此帧 ${count} 个批注内容`);});
-    els.radialDismissLayer.addEventListener('pointerdown',e=>{e.preventDefault();e.stopPropagation();hideAnnotationRadialMenu();});
+    $('.radial-settings').addEventListener('wheel',e=>{
+      if (els.annotationSizeRange.disabled || !e.deltaY) return;
+      e.preventDefault();adjustAnnotationSize(e.deltaY<0?1:-1);
+    },{passive:false});
+    $$('[data-annotation-color]').forEach(button=>button.addEventListener('click',()=>{
+      state.annotationColor = button.dataset.annotationColor;syncAnnotationColor();persistPreferences();
+    }));
+    $('#clearFrameAnnotations').addEventListener('click',e=>{e.stopPropagation();const frame=currentFrame();const count=state.annotations.filter(a=>a.frame===frame).length;if(!count)return;pushAnnotationUndo();const undoEntry=state.annotationUndo.at(-1);state.annotations=state.annotations.filter(a=>a.frame!==frame);delete state.annotationThumbnails[frame];if(state.selectedAnnotationFrame===frame){state.selectedAnnotationId=null;state.selectedAnnotationFrame=null;}hideAnnotationRadialMenu();refreshAnnotationUI();offerUndo(`已清除此帧 ${count} 个批注`,undoEntry);});
+    els.radialDismissLayer.addEventListener('pointerdown',e=>{
+      e.preventDefault();e.stopPropagation();hideAnnotationRadialMenu();
+      if(e.button===2){beginQuickAnnotation(e);if(state.quickGesture)state.quickGesture.dismissOnly=true;}
+    });
     els.radialDismissLayer.addEventListener('contextmenu',e=>e.preventDefault());
     $('#toggleAnnotationsBtn').addEventListener('click',()=>{state.annotationVisible=!state.annotationVisible;$('#toggleAnnotationsBtn').textContent=state.annotationVisible?'全部隐藏':'全部显示';drawAnnotations();});
     $$('[data-annotation-scope]').forEach(btn=>btn.addEventListener('click',()=>{state.annotationScope=btn.dataset.annotationScope;$$('[data-annotation-scope]').forEach(item=>item.classList.toggle('active',item===btn));renderAnnotationList();}));
@@ -3349,9 +3627,28 @@
       else if(state.currentMediaKey)els.notesSaved.textContent='未保存 · Ctrl+S';
       toast(state.autosave?'实时自动保存已开启':'实时自动保存已关闭；仍可使用 Ctrl+S 手动保存');
     });
-    els.scrubSensitivity.addEventListener('input',e=>{state.viewerScrubSensitivity=Number(e.target.value);els.scrubSensitivityValue.textContent=`${state.viewerScrubSensitivity.toFixed(2)} 帧/像素`;});
-    els.scrubSensitivity.addEventListener('change',()=>saveWorkspace());
-    $('#resetWorkspaceBtn').addEventListener('click',()=>{if(!confirm('确定清空当前视频的所有书签、批注、循环区间和笔记吗？'))return;state.bookmarks=[];state.annotations=[];state.loopInFrame=null;state.loopOutFrame=null;state.selectedBookmarkIds=[];state.selectedAnnotationId=null;state.selectedAnnotationFrame=null;removeMediaSnapshot(state.currentMediaKey);renderBookmarks();renderTimeline();renderAnnotationList();syncNotes();updateCounts();toast('当前视频工作区已清空');});
+    els.scrubSensitivity.addEventListener('input',e=>{
+      const position = Number(e.target.value);
+      // Give the precision range half the travel, with the default at the midpoint.
+      state.viewerScrubSensitivity = position <= 50 ? .3 * Math.pow(6, (position - 50) / 50) : .3 * Math.pow(10, (position - 50) / 50);
+      syncScrubSensitivityControl();
+    });
+    els.scrubSensitivity.addEventListener('change',()=>persistPreferences());
+    document.querySelectorAll('[data-scrub-sensitivity]').forEach(button=>{
+      button.addEventListener('click',()=>{
+        state.viewerScrubSensitivity = Number(button.dataset.scrubSensitivity);
+        syncScrubSensitivityControl();
+        persistPreferences();
+      });
+    });
+    $('#resetWorkspaceBtn').addEventListener('click',()=>{
+      if (!state.currentWorkspaceReady || !state.currentMediaKey) return;
+      const entry = pushWorkspaceUndo('清空工作区');
+      state.bookmarks=[]; state.annotations=[]; state.annotationThumbnails={}; state.loopInFrame=null; state.loopOutFrame=null;
+      state.selectedBookmarkIds=[]; state.selectedAnnotationId=null; state.selectedAnnotationFrame=null;
+      renderBookmarks(); renderTimeline(); renderAnnotationList(); drawAnnotations(); syncNotes(); updateCounts(); saveWorkspace(true);
+      offerUndo('当前视频工作区已清空',entry);
+    });
     $$('#bookmarkContextMenu [data-action]').forEach(btn=>btn.addEventListener('click',()=>bookmarkMenuAction(btn.dataset.action)));
     $$('#bookmarkContextMenu [data-color]').forEach(chip=>chip.addEventListener('click',()=>{const b=state.bookmarks.find(item=>item.id===state.contextBookmarkId);if(b){b.color=chip.dataset.color;b.updatedTime=new Date().toISOString();renderBookmarks();renderTimeline();saveWorkspace();}hideBookmarkMenu();}));
 
@@ -3439,26 +3736,36 @@
       if (!event.target.closest('#reviewMenu')) reviewMenu.open = false;
       if (!event.target.closest('#topMore')) $('#topMore').open = false;
     });
+    let cleanWindowExitTimer = null;
     const hideControlsOutsideWindow = () => {
-      if (!state.cleanMode) return;
+      if (!state.cleanMode || state.controlsVisibility === 'always') return;
+      if (cleanWindowExitTimer !== null) return;
       clearTimeout(state.cleanControlsTimer);
-      document.body.classList.add('clean-pointer-outside');
-      document.body.classList.remove('clean-controls-visible');
-      hideTimelinePreview();
+      cleanWindowExitTimer = setTimeout(() => {
+        cleanWindowExitTimer = null;
+        if (state.controlsVisibility === 'always') return;
+        document.body.classList.add('clean-pointer-outside');
+        document.body.classList.remove('clean-controls-visible');
+        hideTimelinePreview();
+      }, 280);
     };
-    desktopAPI?.onWindowPointer?.(({ inside }) => {
-      classicWindowOutside = !inside;
-      if (!inside) { classicPointerInside = false; refreshClassicTopbar(); }
-      if (!inside) hideControlsOutsideWindow();
-      else {
-        document.body.classList.remove('clean-pointer-outside');
-        revealCleanControls();
+    desktopAPI?.onWindowPointer?.(({ inside, x, y }) => {
+      // One native sample updates both the window boundary and hover region.
+      // A return cancels the pending exit even if it lands below the header.
+      setClassicWindowPointer(inside);
+      if (inside) {
+        clearTimeout(cleanWindowExitTimer); cleanWindowExitTimer = null;
+        if (!state.cleanMode && Number.isFinite(x) && Number.isFinite(y)) {
+          updateClassicTopbar({clientX:x, clientY:y, target:document.elementFromPoint(x,y), nativePointer:true});
+        }
+        if (document.body.classList.contains('clean-pointer-outside')) {
+          document.body.classList.remove('clean-pointer-outside');
+          revealCleanControls();
+        }
+      } else {
+        // Preserve the exit grace period; do not start a competing hide timer.
+        hideControlsOutsideWindow();
       }
-    });
-    desktopAPI?.onTitlebarHover(({ inside, x, y }) => {
-      if(state.cleanMode)return;
-      if(inside){const target=document.elementFromPoint(x,y);if(target)updateClassicTopbar({clientX:x,clientY:y,target,nativePointer:true});}
-      else{classicPointerInside=false;refreshClassicTopbar();}
     });
     topbar.addEventListener('pointerenter', updateClassicTopbar);
     topbar.addEventListener('pointerleave', event => {
@@ -3473,18 +3780,21 @@
     $$('.topbar details').forEach(menu => menu.addEventListener('toggle', refreshClassicTopbar));
     new MutationObserver(refreshClassicTopbar).observe($('#exportMenu'), { attributes: true, attributeFilter: ['class'] });
     window.addEventListener('blur', () => {
-
+      clearTimeout(classicRevealTimer); classicRevealTimer = null;
+      clearTimeout(classicWindowExitTimer); classicWindowExitTimer = null;
       classicWindowOutside = true; classicPointerInside = false; closeClassicTopbarMenus(); refreshClassicTopbar();
     });
     document.documentElement.addEventListener('pointerenter', updateClassicTopbar);
     document.addEventListener('pointermove',scheduleClassicTopbarUpdate,{passive:true});
     document.addEventListener('pointerdown',updateClassicTopbar,{passive:true});
     document.documentElement.addEventListener('pointerenter',()=>{
+      if (nativeClassicPointer) return;
+      clearTimeout(cleanWindowExitTimer); cleanWindowExitTimer = null;
       document.body.classList.remove('clean-pointer-outside');
       revealCleanControls();
     });
     document.documentElement.addEventListener('pointerleave',event=>{
-      if (event.relatedTarget) return;
+      if (event.relatedTarget || nativeClassicPointer) return;
       if (!nativeClassicPointer) {
         classicWindowOutside = true; classicPointerInside = false; refreshClassicTopbar();
       }
@@ -3563,7 +3873,6 @@
     else if(e.key==='Delete')deleteSelection(); else if(e.key==='Escape'){closeHelpModal();}
   }
 
-  const desktopBootstrap = beginDesktopBootstrap();
   await loadWorkspace(); bindEvents(); setMediaReady(false); renderBookmarks(); renderAnnotationList(); syncNotes(); updateUI();
   await initializeDesktopRuntime(desktopBootstrap);
   scheduleBuiltInColorLutPreload();
@@ -3575,6 +3884,9 @@
     };
     window.__astriaReady = true;
   }
-  // Allow one full layout/paint cycle before the native window becomes visible.
-  if (desktopAPI?.rendererReady) requestAnimationFrame(() => requestAnimationFrame(() => desktopAPI.rendererReady()));
+  // Media launches have their own final layout and main-process paint barrier.
+  if (desktopAPI?.rendererReady) {
+    if (new URLSearchParams(location.search).get('launchMedia') === '1') desktopAPI.rendererReady();
+    else requestAnimationFrame(() => requestAnimationFrame(() => desktopAPI.rendererReady()));
+  }
 })();

@@ -1,3 +1,5 @@
+const startupTrace = require('./startup-trace.cjs');
+startupTrace.mark('main.entry');
 const { app, BrowserWindow, dialog, ipcMain, Menu, shell, screen } = require('electron');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -36,11 +38,16 @@ const MIME_BY_EXTENSION = {
 let mainWindow = null;
 let store = null;
 let pendingLaunchPath = findMediaArgument(process.argv);
+let pendingLaunchMediaPromise = null;
 let deferInitialWindowShow = false;
 let mainWindowReadyToShow = false;
 let rendererUiReady = false;
 let initialMediaPresented = false;
 let initialShowFallback = null;
+let initialShowFallbackUsed = false;
+let initialRevealPending = false;
+let initialRevealTimer = null;
+let initialRevealAnimated = true;
 let manualWindowResize = null;
 let mediaProbeSerial = 0;
 let rendererCloseReadyHandler = null;
@@ -52,7 +59,38 @@ function revealMainWindow() {
   if (deferInitialWindowShow && !initialMediaPresented) return;
   if (initialShowFallback) clearTimeout(initialShowFallback);
   initialShowFallback = null;
-  mainWindow.show();
+  if (initialRevealPending || mainWindow.isVisible()) return;
+  const window = mainWindow;
+  if (!deferInitialWindowShow) { window.show(); return; }
+  initialRevealPending = true;
+  // Present a real visible compositor surface at zero native opacity. This
+  // avoids capturePage's GPU readback and never exposes an opaque blank body.
+  const nativeOpacity = ['win32', 'darwin'].includes(process.platform);
+  if (nativeOpacity) window.setOpacity(0);
+  window.show();
+  startupTrace.mark('compositor.start');
+  let finished = false;
+  const finishReveal = timedOut => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(initialRevealTimer); initialRevealTimer = null;
+    if (window.isDestroyed() || mainWindow !== window) return;
+    startupTrace.mark(timedOut ? 'compositor.timeout' : 'compositor.end');
+    // The media layout is already ready. A stalled RAF must not leave a
+    // zero-opacity window permanently blocking input over the desktop.
+    if (nativeOpacity) window.setOpacity(1);
+    startupTrace.mark('window.full-opacity');
+    initialRevealPending = false;
+    window.webContents.send('vfx:initial-window-shown');
+  };
+  initialRevealTimer = setTimeout(() => finishReveal(true), 500);
+  void window.webContents.executeJavaScript(`new Promise(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
+  })`).then(() => finishReveal(false), error => {
+    startupTrace.mark('compositor.error');
+    console.warn('Unable to synchronize initial presentation:', error.message);
+    finishReveal(false);
+  });
 }
 
 class DesktopStore {
@@ -252,6 +290,9 @@ class DesktopStore {
                   const launchState = {
                     playbackPosition: Number.isFinite(Number(compact.workspace.playbackPosition)) ? Math.max(0, Number(compact.workspace.playbackPosition)) : 0,
                     playbackPoster: compact.workspace.playbackPoster || '',
+                    mediaDuration: Number(compact.workspace.mediaDuration) || 0,
+                    mediaWidth: Number(compact.workspace.mediaWidth) || 0,
+                    mediaHeight: Number(compact.workspace.mediaHeight) || 0,
                     fps: Number(compact.workspace.fps) || 24,
                     fpsMode: compact.workspace.fpsMode === 'custom' ? 'custom' : 'source',
                     fpsModeExplicit: compact.workspace.fpsModeExplicit === true,
@@ -510,12 +551,26 @@ function fitCleanVideoWindow(requestedWidth) {
 }
 
 function createWindow() {
-  // Wait for the renderer's first complete layout, but not for video decode.
-  // This avoids exposing BrowserWindow's plain background during startup.
-  deferInitialWindowShow = false;
+  // A file launched with the process gets one hidden layout commit. Normal app
+  // launches still reveal the start screen as soon as its UI is ready.
+  deferInitialWindowShow = !!pendingLaunchPath;
+  if (pendingLaunchPath) startupTrace.mark('launch.describe-start');
+  pendingLaunchMediaPromise = pendingLaunchPath
+    ? describeVideo(pendingLaunchPath).then(async media => {
+        if (!media) return null;
+        startupTrace.mark('launch.descriptor-ready');
+        const launchState = await store.loadLaunchState(media.mediaId);
+        startupTrace.mark('launch.state-ready', { poster: !!launchState?.playbackPoster, mediaKind: media.mediaKind });
+        return { ...media, _launchState: launchState };
+      }).catch(() => null)
+    : null;
   mainWindowReadyToShow = false;
   rendererUiReady = false;
-  initialMediaPresented = true;
+  initialMediaPresented = !deferInitialWindowShow;
+  initialShowFallbackUsed = false;
+  initialRevealPending = false;
+  initialRevealAnimated = true;
+  startupTrace.mark('window.create-start');
   mainWindow = new BrowserWindow({
     width: 1500,
     height: 940,
@@ -539,16 +594,42 @@ function createWindow() {
       backgroundThrottling: false
     }
   });
+  startupTrace.mark('window.created');
+  mainWindow.once('show', () => {
+    startupTrace.mark('window.shown');
+    if (!deferInitialWindowShow) startupTrace.mark('window.full-opacity');
+    if (!deferInitialWindowShow && !mainWindow?.isDestroyed()) mainWindow.webContents.send('vfx:initial-window-shown');
+  });
 
-  mainWindow.loadFile(path.join(__dirname, '..', 'index.html'), { query: isSmokeTest ? { smoke:'1' } : {} });
+  const windowQuery = {};
+  if (isSmokeTest) windowQuery.smoke = '1';
+  if (deferInitialWindowShow) windowQuery.launchMedia = '1';
+  const loadingWindow = mainWindow;
+  let startupFailureReported = false;
+  const reportStartupFailure = message => {
+    if (startupFailureReported || loadingWindow.isDestroyed() || mainWindow !== loadingWindow) return;
+    startupFailureReported = true;
+    clearTimeout(initialRevealTimer); initialRevealTimer = null;
+    startupTrace.mark('window.startup-error');
+    void startupTrace.flush();
+    dialog.showErrorBox('Astria 启动失败', `${message}\n请关闭后重新打开播放器。`);
+    loadingWindow.destroy();
+  };
+  loadingWindow.webContents.on('render-process-gone', (_event, details) => {
+    reportStartupFailure(`界面进程已退出（${details.reason}）`);
+  });
+  void loadingWindow.loadFile(path.join(__dirname, '..', 'index.html'), { query: windowQuery })
+    .catch(error => reportStartupFailure(`无法加载播放器界面：${error.message}`));
   mainWindow.once('ready-to-show', () => {
+    startupTrace.mark('window.ready-to-show');
     mainWindowReadyToShow = true;
     if (isSmokeTest) { mainWindow.maximize(); broadcastWindowState(); }
-    initialShowFallback = setTimeout(() => {
+    // File launches are released by a complete playback layout (or an explicit
+    // load error). A timer must not expose the poster-only intermediate layout.
+    if (!deferInitialWindowShow) initialShowFallback = setTimeout(() => {
       rendererUiReady = true;
-      initialMediaPresented = true;
       revealMainWindow();
-    }, 4000);
+    }, 1400);
     revealMainWindow();
   });
   mainWindow.webContents.once('did-finish-load', broadcastWindowState);
@@ -627,7 +708,6 @@ function createWindow() {
     if (titlebarWindow.isDestroyed() || windowInteractionActive) return;
     if (!titlebarWindow.isVisible() || titlebarWindow.isMinimized() || !titlebarWindow.isFocused()) {
       if (windowWasInside) titlebarWindow.webContents.send('vfx:window-pointer', { inside: false });
-      if (titlebarWasInside) titlebarWindow.webContents.send('vfx:titlebar-hover', { inside: false, x: 0, y: 0 });
       windowWasInside = false; titlebarWasInside = false;
       return;
     }
@@ -635,17 +715,20 @@ function createWindow() {
     const cursor = screen.getCursorScreenPoint();
     const x = cursor.x - bounds.x, y = cursor.y - bounds.y;
     const windowInside = titlebarWindow.isVisible() && !titlebarWindow.isMinimized() && x >= 0 && x < bounds.width && y >= 0 && y < bounds.height;
-    if (windowInside !== windowWasInside) {
-      titlebarWindow.webContents.send('vfx:window-pointer', { inside: windowInside });
-      windowWasInside = windowInside;
-    }
     const zoom = titlebarWindow.webContents.getZoomFactor();
-    // Cover both renderer reveal/hold boundaries at every UI zoom level.
-    const inside = titlebarWindow.isFocused() && windowInside && y / zoom < 120;
-    if (inside || titlebarWasInside) titlebarWindow.webContents.send('vfx:titlebar-hover', { inside, x: x / zoom, y: y / zoom });
+    const inside = windowInside && y / zoom < 120;
+    // Send coordinates and window membership atomically. Include the first
+    // sample below the header to clear hover after a rapid return at the side.
+    if (windowInside !== windowWasInside || inside || titlebarWasInside) {
+      titlebarWindow.webContents.send('vfx:window-pointer', { inside: windowInside, x: x / zoom, y: y / zoom });
+    }
+    windowWasInside = windowInside;
     titlebarWasInside = inside;
-  }, 80);
+  }, 32);
   mainWindow.on('closed', () => {
+    clearTimeout(initialRevealTimer);
+    initialRevealTimer = null;
+    initialRevealPending = false;
     manualWindowResize = null;
     if (rendererCloseReadyHandler === closeReadyHandler) rendererCloseReadyHandler = null;
     clearTimeout(closeFallback);
@@ -653,12 +736,17 @@ function createWindow() {
     clearTimeout(windowInteractionTimer);
     if (initialShowFallback) clearTimeout(initialShowFallback);
     initialShowFallback = null;
+    initialShowFallbackUsed = false;
     mainWindowReadyToShow = false;
     mainWindow = null;
   });
 }
 
 function registerIpc() {
+  const startupMarks = new Set(['renderer.gpu-start', 'renderer.gpu-end', 'renderer.script-start', 'renderer.bootstrap', 'renderer.poster-loaded', 'renderer.poster-layout', 'renderer.first-frame']);
+  ipcMain.on('vfx:startup-mark', (event, name) => {
+    if (event.sender === mainWindow?.webContents && event.senderFrame === mainWindow.webContents.mainFrame && startupMarks.has(name)) startupTrace.mark(name);
+  });
   ipcMain.handle('vfx:describe-dropped-file', async (event, filePath) => {
     if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('访问被拒绝');
     const media = await describeVideo(filePath); await registerRecent(media); return media;
@@ -707,7 +795,8 @@ function registerIpc() {
       bottom: Math.max(0, Math.min(100, Number(options.bottomInset) || 0)),
       side: Math.max(0, Math.min(600, Number(options.sideInset) || 0))
     };
-    if (options.resizeWindow !== false) {
+    const freezeInitialBounds = options.initialCommit === true && deferInitialWindowShow && initialShowFallbackUsed && mainWindow.isVisible();
+    if (options.resizeWindow !== false && !freezeInitialBounds) {
       fitCleanVideoWindow(mainWindow.getBounds().width + (videoWindowInsets.side - oldSide) * mainWindow.webContents.getZoomFactor());
     }
     return true;
@@ -759,18 +848,27 @@ function registerIpc() {
   });
   ipcMain.handle('vfx:consume-launch-media', async () => {
     const launchPath = pendingLaunchPath;
+    const launchMediaPromise = pendingLaunchMediaPromise;
     pendingLaunchPath = null;
-    const media = await describeVideo(launchPath);
-    await registerRecent(media);
+    pendingLaunchMediaPromise = null;
+    const media = launchMediaPromise
+      ? await launchMediaPromise
+      : await describeVideo(launchPath);
+    // Recent-document bookkeeping and menu rebuilding are unrelated to the
+    // first frame, so keep them off the launch-media response path.
+    setImmediate(() => { void registerRecent(media); });
     return media;
   });
   ipcMain.on('vfx:renderer-ready', event => {
     if (event.sender !== mainWindow?.webContents) return;
+    startupTrace.mark('renderer.ui-ready');
     rendererUiReady = true;
     revealMainWindow();
   });
-  ipcMain.on('vfx:initial-media-presented', () => {
-    if (!deferInitialWindowShow) return;
+  ipcMain.on('vfx:initial-media-presented', (event, options) => {
+    if (event.sender !== mainWindow?.webContents || !deferInitialWindowShow) return;
+    startupTrace.mark('renderer.presentation-ready');
+    initialRevealAnimated = options?.reduceMotion !== true;
     initialMediaPresented = true;
     revealMainWindow();
   });
@@ -846,6 +944,8 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    startupTrace.configure(app.getPath('userData'), { version: app.getVersion(), packaged: app.isPackaged, launchMedia: !!pendingLaunchPath });
+    startupTrace.mark('app.ready');
     const storePath = path.join(app.getPath('userData'), 'app-data.json');
     if (!fs.existsSync(storePath)) {
       const legacyCandidates = ['VFX Player','vfx-player'].map(folder => path.join(app.getPath('appData'), folder, 'app-data.json'));
@@ -869,6 +969,7 @@ if (!hasSingleInstanceLock) {
   let quitting = false;
   app.on('before-quit', event => {
     if (quitting) return; event.preventDefault(); quitting = true;
+    void startupTrace.flush();
     Promise.resolve(mediaService?.dispose())
       .then(async () => { try { await catalogReady; } catch { /* initialization failure must not block exit */ } return catalog?.dispose(); })
       .finally(() => app.quit());
