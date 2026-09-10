@@ -59,6 +59,7 @@
     async ensureSession() {
       if (!this.session) this.session = this.api.create().then(id => {
         this.id = id;
+        if (this.destroyed) return id;
         this.disposers.push(this.api.onState(event => { if (event.id === id) this.onState(event); }),
           this.api.onFrame(frame => { if (frame.id === id) this.drawSoftware(frame); }),
           this.api.onSharedTextureFrame(id, (frame, metadata) => this.drawShared(frame, metadata)));
@@ -69,6 +70,7 @@
     }
     fail(error) { this.error = error; this.emit('error', { message: error.message || String(error) }); }
     call(command, ...args) {
+      if (this.destroyed) return Promise.resolve();
       const generation = this.generation;
       return this.ensureSession().then(id => {
         if (generation !== this.generation) return;
@@ -186,8 +188,8 @@
     seek(time) { this.seeking = true; this.fire('seek', time, this.media?.mediaId); }
     step(direction) { this.pause(); this.stepping = true; this.seeking = true; this.fire('step', direction); }
     setSpeed(value) { this._speed = value; if (this.session) this.fire('setSpeed', value); }
-    setVolume(value) { this._volume = value; if (this.session) this.fire('setVolume', value); }
-    setMuted(value) { this._muted = value; if (this.session) this.fire('setMuted', value); }
+    setVolume(value) { const changed = this._volume !== value; this._volume = value; if (this.session) this.fire('setVolume', value); if (changed) this.emit('volumechange'); }
+    setMuted(value) { const changed = this._muted !== value; this._muted = value; if (this.session) this.fire('setMuted', value); if (changed) this.emit('volumechange'); }
     setOutputTarget(width, height, mode = 'viewport') {
       const even = value => Math.max(2, Math.round(Number(value) / 2) * 2);
       const next = { width: even(width), height: even(height), mode };
@@ -231,12 +233,13 @@
     }
     async destroy() {
       if (this.destroyPromise) return this.destroyPromise;
+      this.destroyed = true; this.generation++; this.readyState = 0;
       this.destroyPromise = (async () => {
         this.stopReverse(); for (const dispose of this.disposers.splice(0)) dispose(); this.callbacks.clear();
         for (const pending of this.sourceFrameRequests.values()) { clearTimeout(pending.timer); pending.reject(new Error('播放器已关闭')); }
         this.sourceFrameRequests.clear(); this.frameStates.clear(); this.renderedFrames.clear();
-        if (this.session) await this.api.destroy(await this.session);
-        this.upload?.destroy(); this.presenter?.destroy();
+        try { if (this.session) await this.api.destroy(await this.session); }
+        finally { this.upload?.destroy(); this.presenter?.destroy(); }
       })();
       return this.destroyPromise;
     }

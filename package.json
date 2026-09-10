@@ -13,11 +13,12 @@
   "scripts": {
     "start": "electron-forge start",
     "smoke": "electron . --smoke-test",
+    "check:playback": "node scripts/playback-features-smoke.cjs",
     "package": "electron-forge package",
     "make": "electron-forge make",
     "make:forge": "electron-forge make --platform=win32",
     "make:win": "electron-builder --config electron-builder.config.cjs --win nsis zip --x64",
-    "check": "node --check resource-browser.js && node --check electron/video-browser.cjs && node --check app.js && node --check electron/main.cjs && node --check electron/preload.cjs && node --check playback-adapter.js && node --check electron/media-catalog.cjs && node --check electron/media-service.cjs",
+    "check": "node --check scope-gpu.js && node --check player-features.js && node --check resource-browser.js && node --check electron/video-browser.cjs && node --check app.js && node --check electron/main.cjs && node --check electron/preload.cjs && node --check playback-adapter.js && node --check electron/media-catalog.cjs && node --check electron/media-service.cjs",
     "native:build": "node scripts/native-build.cjs",
     "check:formats": "node scripts/format-smoke.cjs",
     "check:browser": "electron scripts/browser-smoke.cjs"
@@ -45,6 +46,8 @@
     "files": [
       "app.js",
       "resource-browser.js",
+      "player-features.js",
+      "scope-gpu.js",
       "index.html",
       "styles.css",
       "electron/**/*",
@@ -55,6 +58,7 @@
       "playback-adapter.js",
       "THIRD_PARTY_NOTICES.md",
       "scripts/desktop-smoke.cjs",
+      "scripts/release-ui-smoke.cjs",
       "scripts/sequence-smoke.cjs"
     ],
     "win": {

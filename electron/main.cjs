@@ -458,11 +458,25 @@ function sendMedia(media) {
   mainWindow.webContents.send('vfx:open-video-from-system', media);
 }
 
+// With thickFrame:false Windows can resize to fullscreen while Electron's
+// native style-based isFullScreen() remains false. Track our requested state.
+let framelessFullscreen = false;
+function isWindowFullscreen() {
+  return framelessFullscreen || !!mainWindow?.isFullScreen();
+}
+function toggleWindowFullscreen() {
+  if (!mainWindow || mainWindow.isDestroyed()) return getWindowState();
+  const next = !isWindowFullscreen();
+  if (process.platform === 'win32') framelessFullscreen = next;
+  mainWindow.setFullScreen(next);
+  broadcastWindowState();
+  return getWindowState();
+}
 function getWindowState() {
   if (!mainWindow || mainWindow.isDestroyed()) return { maximized: false, fullscreen: false, taskbarSafeBottom: 0 };
   return {
     maximized: mainWindow.isMaximized(),
-    fullscreen: mainWindow.isFullScreen(),
+    fullscreen: isWindowFullscreen(),
     taskbarSafeBottom: 0
   };
 }
@@ -508,7 +522,7 @@ function rebuildMenu() {
     {
       label: '视图',
       submenu: [
-        { role: 'togglefullscreen', label: '切换全屏' },
+        { label: '切换全屏', accelerator: 'F11', click: toggleWindowFullscreen },
         { type: 'separator' },
         { label: '复原画面比例', click: () => sendCommand('reset-view') },
         { role: 'zoomIn', label: '放大界面' },
@@ -532,7 +546,7 @@ let cleanVideoRatio = null;
 let videoWindowInsets = { bottom: 0, side: 0 };
 let classicWindowBounds = null;
 function fitCleanVideoWindow(requestedWidth) {
-  if (!cleanVideoRatio || !mainWindow || mainWindow.isDestroyed() || mainWindow.isMaximized() || mainWindow.isFullScreen() || mainWindow.isMinimized()) return;
+  if (!cleanVideoRatio || !mainWindow || mainWindow.isDestroyed() || mainWindow.isMaximized() || isWindowFullscreen() || mainWindow.isMinimized()) return;
   const bounds = mainWindow.getBounds();
   const area = screen.getDisplayMatching(bounds).workArea;
   const maxWidth = Math.floor(area.width * .9), maxHeight = Math.floor(area.height * .9);
@@ -785,6 +799,8 @@ function registerIpc() {
     if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('访问被拒绝');
     return store.deleteWorkspace(key);
   });
+  ipcMain.handle('vfx:choose-comparison', async () => { const result=await dialog.showOpenDialog(mainWindow,{properties:['openFile'],filters:[{name:'视频',extensions:require('../media-formats.js').video}]}); return result.canceled ? null : describeVideo(result.filePaths[0]); });
+  ipcMain.handle('vfx:set-always-on-top', (event,value) => { if(event.sender!==mainWindow?.webContents || typeof value!=='boolean')throw Error('无效置顶设置'); mainWindow.setAlwaysOnTop(value); return mainWindow.isAlwaysOnTop(); });
   ipcMain.handle('vfx:get-version', () => app.getVersion());
   ipcMain.handle('vfx:get-window-state', getWindowState);
   ipcMain.handle('vfx:fit-video-window', (event, options) => {
@@ -792,7 +808,7 @@ function registerIpc() {
     if (options?.enabled === false) {
       cleanVideoRatio = null;
       mainWindow.setMinimumSize(980, 680);
-      if (classicWindowBounds && !mainWindow.isMaximized() && !mainWindow.isFullScreen()) mainWindow.setBounds(classicWindowBounds);
+      if (classicWindowBounds && !mainWindow.isMaximized() && !isWindowFullscreen()) mainWindow.setBounds(classicWindowBounds);
       classicWindowBounds = null;
       return true;
     }
@@ -825,7 +841,7 @@ function registerIpc() {
   ipcMain.on('vfx:window-resize-begin', (event, edge, point) => {
     const allowedEdges = new Set(['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw']);
     if (process.platform !== 'win32' || event.sender !== mainWindow?.webContents || !allowedEdges.has(edge) ||
-        mainWindow.isMaximized() || mainWindow.isFullScreen() || !Number.isFinite(point?.x) || !Number.isFinite(point?.y)) return;
+        mainWindow.isMaximized() || isWindowFullscreen() || !Number.isFinite(point?.x) || !Number.isFinite(point?.y)) return;
     manualWindowResize = { edge, point: { x: point.x, y: point.y }, bounds: mainWindow.getBounds() };
   });
   ipcMain.on('vfx:window-resize-update', (event, point) => {
@@ -851,11 +867,7 @@ function registerIpc() {
   });
   ipcMain.handle('vfx:window-close', () => { mainWindow?.close(); return true; });
   ipcMain.on('vfx:renderer-close-ready', event => rendererCloseReadyHandler?.(event.sender));
-  ipcMain.handle('vfx:toggle-fullscreen', () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return getWindowState();
-    mainWindow.setFullScreen(!mainWindow.isFullScreen());
-    return getWindowState();
-  });
+  ipcMain.handle('vfx:toggle-fullscreen', toggleWindowFullscreen);
   ipcMain.handle('vfx:consume-launch-media', async () => {
     const launchPath = pendingLaunchPath;
     const launchMediaPromise = pendingLaunchMediaPromise;

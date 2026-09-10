@@ -20,4 +20,15 @@ const file=src+'/mpv-0.41.0/meson.build';let meson=fs.readFileSync(file,'utf8');
 
 fs.writeFileSync(sdk+'/include/libavutil/ffversion.h','#define FFMPEG_VERSION "6.1.1"\n');
 fs.copyFileSync('native/core-patches/astria_sdr.h',src+'/mpv-0.41.0/video/out/astria_sdr.h');
+// The shipped libass owns public ASS strings and allocates them in msvcrt.
+// mpv itself uses UCRT; never free/reallocate those strings with UCRT.
+const assImports=cp.execFileSync(tools+'dumpbin.exe',['/imports',path.resolve('.cache/libmpv/bin/libass-9.dll')],{encoding:'utf8'});
+if(!/msvcrt\.dll/i.test(assImports)||/api-ms-win-crt-heap|ucrtbase\.dll/i.test(assImports))throw Error('Re-evaluate ASS allocator bridge for this libass runtime');
+fs.copyFileSync('native/core-patches/astria_ass_alloc.h',src+'/mpv-0.41.0/sub/astria_ass_alloc.h');
+for(const name of ['ass_mp.c','sd_ass.c','osd_libass.c']){
+ const file=src+'/mpv-0.41.0/sub/'+name;let code=fs.readFileSync(file,'utf8');
+ if(!code.includes('astria_ass_alloc.h'))code=code.replace('#include <stdlib.h>','#include <stdlib.h>\n#include "astria_ass_alloc.h"');
+ code=code.replace(/\b(free|malloc|strdup)\(/g,'astria_ass_$1(');
+ fs.writeFileSync(file,code);
+}
 const swFile=src+'/mpv-0.41.0/video/out/libmpv_sw.c';let sw=fs.readFileSync(swFile,'utf8');if(!sw.includes('astria_sdr.h'))sw=sw.replace('#include "video/sws_utils.h"','#include "video/sws_utils.h"\n#include "astria_sdr.h"');sw=sw.replace('mp_sws_scale(p->sws, &dst, &src)','astria_sdr_scale(p->sws, &dst, &src)');fs.writeFileSync(swFile,sw);

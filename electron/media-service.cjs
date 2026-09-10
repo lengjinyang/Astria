@@ -56,6 +56,23 @@ class MediaService {
       stop: (event, id) => this.session(event, id).player.stop(),
       seek: (event, id, seconds, mediaId) => this.session(event, id).seek(number(seconds, 0, 1e10), mediaId),
       step: (event, id, direction) => { if (direction !== -1 && direction !== 1) throw new Error('无效逐帧方向'); const session = this.session(event, id); session.stepPending = true; session.player.step(direction); },
+      tracks: (event,id) => this.session(event,id).player.tracks(),
+      trackSettings: (event,id) => {
+        const info=this.session(event,id).player.getInfo();
+        return Object.fromEntries(['audio-delay','sub-delay','sub-scale'].map(key=>[key,info[key]]));
+      },
+      configureTrack: (event,id,key,value) => {
+        if (!['aid','sid','audio-delay','sub-delay','sub-scale'].includes(key)) throw Error('无效音轨或字幕设置');
+        if (['aid','sid'].includes(key)) { if(value !== 'no' && value !== 'auto') integer(value,1,10000); }
+        else number(value,key === 'sub-scale' ? .25 : -30,key === 'sub-scale' ? 4 : 30);
+        return this.session(event,id).player.configureTrack(key,String(value));
+      },
+      addSubtitle: async (event,id) => {
+        const {dialog}=require('electron');
+        const result=await dialog.showOpenDialog(this.getWindow(),{filters:[{name:'字幕',extensions:['srt','ass','ssa','vtt','sub']}],properties:['openFile']});
+        if(!result.canceled) this.session(event,id).player.addSubtitle(result.filePaths[0]);
+        return this.session(event,id).player.tracks();
+      },
       setSpeed: (event, id, speed) => this.session(event, id).player.setSpeed(number(speed, 0.01, 100)),
       setVolume: (event, id, volume) => this.session(event, id).player.setVolume(number(volume, 0, 1) * 100),
       setMuted: (event, id, muted) => { if (typeof muted !== 'boolean') throw new Error('无效静音参数'); this.session(event, id).player.setMuted(muted); },

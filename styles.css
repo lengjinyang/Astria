@@ -2093,6 +2093,14 @@ body.desktop-runtime.media-ready:not(.clean-mode) .topbar,
 body.desktop-runtime:not(.clean-mode):not(.media-ready) .topbar :is(.brand,.top-center,.project-title,.media-info-top),
 body.desktop-runtime.media-ready:not(.clean-mode) .topbar :is(.brand,.top-center,.project-title,.media-info-top) { -webkit-app-region: drag; }
 body.desktop-runtime .topbar :is(button,input,select,label,summary,.review-tool-cluster,.top-actions,.top-tool-panel,.export-menu,.top-more-menu) { -webkit-app-region: no-drag; }
+/* Keep the complete control subtree out of native caption hit testing. */
+body.desktop-runtime .topbar :is(button,input,select,label,summary,.review-tool-cluster,.top-actions,.top-tool-panel,.export-menu,.top-more-menu) *,
+body.desktop-runtime .clean-window-controls,
+body.desktop-runtime .clean-window-controls * { -webkit-app-region: no-drag; }
+.topbar :is(button,summary) svg,
+.topbar :is(button,summary) svg *,
+.clean-window-controls button svg,
+.clean-window-controls button svg * { pointer-events: none; }
 body.desktop-runtime:has(.modal-backdrop.open,.annotation-radial-menu.open) .topbar,
 body.desktop-runtime:has(.modal-backdrop.open,.annotation-radial-menu.open) .topbar * { -webkit-app-region: no-drag; }
 /* Preserve the original control sizes; emphasize the timeline only while seeking. */
@@ -2909,7 +2917,7 @@ body.media-ready:not(.clean-mode).classic-topbar-visible .topbar {
 .resource-columns section > small { color: var(--muted); font-size: 10px; padding: 2px 6px 6px; }
 #resourceTree { flex: 1; overflow: auto; min-height: 0; }
 .resource-tree-row { display: flex; align-items: center; min-height: 30px; width: max-content; min-width: 100%; }
-.resource-tree-row > button:first-child { flex: 0 0 24px; width: 24px; padding: 0; }
+.resource-tree-row > button:first-child { flex: 0 0 18px; width: 18px; padding: 0; }
 .resource-tree-label { text-align: left; white-space: nowrap; flex: 1 0 auto; }
 .resource-tree-label.selected { background: rgba(255,255,255,.09); color: var(--text); }
 
@@ -2944,7 +2952,7 @@ body.media-ready:not(.clean-mode).classic-topbar-visible .topbar {
 .resource-browser .resource-entry { justify-content: flex-start; }
 .resource-browser .resource-entry-icon { display: flex; align-items: center; justify-content: center; flex: 0 0 18px; }
 .resource-browser .resource-entry.playing .resource-entry-icon { color: var(--text); }
-.resource-browser .resource-tree-label { justify-content: flex-start; }
+.resource-browser .resource-tree-label { justify-content: flex-start; padding-inline: 3px; gap: 4px; }
 .resource-tree-label > svg { color: var(--muted); }
 .resource-tree-row > button:first-child svg { width: 12px; height: 12px; flex-basis: 12px; }
 .resource-browser header button,.resource-browser nav button { color: #b5b5b5; }
@@ -3042,3 +3050,104 @@ body.clean-mode.clean-window-controls-visible .clean-window-controls {
     translate: none; transition: none;
   }
 }
+.playback-tools { position:fixed;z-index:115;left:16px;top:48px;width:min(360px,calc(100vw - 32px));max-height:calc(100vh - 70px);overflow:auto;background:#202020;color:#ddd;border:1px solid #444;border-radius:10px;padding:14px;font-size:12px; }
+.playback-tools[hidden],.comparison-view[hidden],.scope-panel[hidden] {display:none!important}
+.playback-tools header,.scope-panel header {display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.playback-tools fieldset {border:1px solid #444;border-radius:6px;margin:12px 0;padding:10px}
+.playback-tools label {display:flex;align-items:center;justify-content:space-between;gap:10px;margin:9px 0}
+.playback-tools input[type=number] {width:85px}
+#pinTools {justify-content:flex-start}
+.playback-tools select {max-width:220px}
+.playback-tools button,.playback-tools input,.playback-tools select,.scope-panel button {background:#333;color:#ddd;border:1px solid #555;border-radius:4px;padding:5px}
+.playback-tools small {display:block;color:#aaa;line-height:1.6;margin-top:8px}
+body.comparing .viewer-stage {width:50%!important}
+body.media-ready.comparing .viewer-stage {background:#000}
+body.comparing .viewer-stage::after {content:'A · 当前视频';position:absolute;top:12px;left:12px;z-index:8;color:#ddd;background:#222a;padding:4px;font-size:12px;pointer-events:none}
+.comparison-view {grid-area:viewer;position:relative;justify-self:end;width:50%;min-height:0;overflow:hidden;background:#000;display:grid;place-items:center;border-left:1px solid #555;z-index:2}
+.comparison-view canvas,.comparison-view video {position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+.comparison-view span {position:absolute;top:12px;left:12px;z-index:2;color:#ddd;background:#222a;padding:4px}
+.comparison-view[data-out-of-range=true]::after {content:'B 已超出时间范围';position:absolute;bottom:12px;color:#ddd;background:#222c;padding:5px}
+.scope-panel {position:fixed;left:16px;bottom:64px;width:min(512px,calc(100vw - 32px));z-index:90;background:#1a1a1a;color:#ccc;border:1px solid #444;border-radius:8px;padding:10px;font-size:12px}
+.scope-panel canvas {width:100%;height:auto;display:block}
+.playback-feedback {position:fixed;left:50%;bottom:64px;translate:-50% 0;z-index:120;background:#171717db;color:#eee;padding:10px 18px;border-radius:8px;opacity:0;pointer-events:none;transition:opacity .12s}
+.playback-feedback.visible {opacity:1}
+
+.feature-fields {font-size:12px;color:var(--text)}
+.feature-fields fieldset {border:0;margin:0;padding:0;min-width:0}
+.feature-fields legend {display:none}
+.feature-fields label {display:flex;align-items:center;justify-content:space-between;gap:8px;margin:9px 0}
+.feature-fields input {width:90px}
+.feature-fields :is(button,input,select) {background:#333;color:#ddd;border:1px solid #555;border-radius:4px;padding:5px}
+.feature-fields small {display:block;color:#aaa;line-height:1.6;margin-top:8px}
+.playback-tools fieldset[hidden],.playback-feature-button[hidden] {display:none!important}
+body .topbar .playback-feature-button svg {width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.85;stroke-linecap:round;stroke-linejoin:round}
+.playback-feature-button[aria-pressed=true],.playback-feature-button[aria-expanded=true] {background:#ffffff12;color:#eee}
+
+.comparison-controls {grid-area:viewer;align-self:end;z-index:12;display:flex;align-items:center;justify-content:center;gap:14px;min-height:48px;padding:8px 16px;background:#191b1e;color:#ccc;font-size:12px;border-top:1px solid #ffffff12}
+.comparison-controls[hidden],.feature-review-tool[hidden] {display:none!important}
+.comparison-controls label {display:flex;align-items:center;gap:8px}
+.comparison-controls input {width:100px}
+.comparison-controls :is(button,input) {background:#2b2d30;border:1px solid #484b50;border-radius:5px;color:#ddd;padding:6px 9px}
+.comparison-controls output {max-width:30%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+body.comparing .viewer-stage,.comparison-view {margin-bottom:52px}
+.comparison-view[data-out-of-range=true]::after {bottom:14px}
+.scope-panel {width:min(740px,calc(100vw - 32px));background:#181a1c}
+.scope-options {display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.scope-options label {display:flex;align-items:center;gap:5px;font-size:11px;color:#aaa}
+.scope-options select {background:#282b2e;color:#ccc;border:1px solid #414447;border-radius:4px;padding:4px}
+.scope-options input[type=range] {width:70px}
+.scope-panel small {display:block;color:#969b9f;font:10px monospace;margin-top:6px}
+
+body.comparing .scope-panel {bottom:120px}
+
+.comparison-controls {flex-wrap:wrap;gap:8px 12px;min-height:76px}
+.comparison-controls .comparison-timeline {flex:1 0 100%;display:flex;gap:12px;min-width:0;margin:0}
+.comparison-timeline input[type=range] {flex:1;min-width:80px;width:auto;padding:0;accent-color:#bcbcbc;cursor:ew-resize}
+.comparison-timeline output {flex:none;font:11px monospace;max-width:none}
+body.comparing .viewer-stage,body.comparing .comparison-view {margin-bottom:84px}
+body.comparing .scope-panel {bottom:152px}
+
+.scope-tabs {display:flex;gap:5px;flex-wrap:wrap;margin:0 0 10px;padding-bottom:10px;border-bottom:1px solid #ffffff12}
+.scope-panel .scope-tabs button {flex:1;white-space:nowrap;padding:7px 10px;background:transparent;border:1px solid transparent;color:#969da3;cursor:pointer}
+.scope-panel .scope-tabs button:hover {background:#ffffff09;color:#ddd}
+.scope-panel .scope-tabs button[aria-pressed=true] {background:#34393e;border-color:#59636b;color:#eef2f5}
+.scope-options label[hidden] {display:none!important}
+.scope-options {min-height:26px;justify-content:flex-end}
+.scope-panel header b {font-size:12px;font-weight:500}
+
+/* Inline controls share the title baseline and keep their own hit targets. */
+.topbar .review-menu .top-tool-popover:has(> summary > .review-inline-actions) > summary {display:flex;align-items:center;gap:10px;padding:0 9px;min-height:32px}
+.topbar .review-menu .top-tool-popover:has(> summary > .review-inline-actions) > summary > span {white-space:nowrap}
+.topbar .review-menu .top-tool-popover:has(> summary > .review-inline-actions) > summary > svg {flex-shrink:0}
+.topbar .review-menu .top-tool-popover:has(> summary > .review-inline-actions) > summary > i {position:static;order:3;flex-shrink:0;margin-left:2px}
+.topbar .review-menu #guideViewTool:has(> summary > .review-inline-actions) > summary::after {display:none}
+.review-inline-actions {position:static;margin-left:auto;display:flex;align-items:center;gap:5px;flex-shrink:0;-webkit-app-region:no-drag}
+.topbar .review-menu summary:has(.review-inline-actions:hover) {background:transparent}
+.topbar .review-inline-actions button {height:24px;min-width:40px;padding:0 8px;border:1px solid #ffffff16;border-radius:5px;background:#ffffff05;color:#aaa;font:11px/1 "Segoe UI","Microsoft YaHei",sans-serif;cursor:pointer}
+.topbar .review-inline-actions button:hover {background:#ffffff12;color:#eee}
+.topbar .review-inline-actions button[aria-pressed=true] {background:#ffffff1c;border-color:#ffffff35;color:#eee}
+.topbar .review-inline-actions select {width:132px;min-width:0;height:24px;padding:0 4px;border:1px solid #ffffff16;border-radius:5px;background:#292c2d;color:#bbb;font-size:11px}
+.topbar .review-inline-actions :is(button,select):focus-visible {outline:1px solid #aaa;outline-offset:2px}
+
+.scope-panel canvas {aspect-ratio:12 / 5}
+.scope-panel small {font:11px/1.5 "Segoe UI","Microsoft YaHei",sans-serif;color:#aeb4b9}
+
+/* Comparison modes share the same synchronized A/B playback. */
+.comparison-mode-bar {display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px 14px;flex:1 0 100%}
+.comparison-mode-bar [hidden] {display:none!important}
+.comparison-mode-bar select {background:#2b2d30;border:1px solid #484b50;border-radius:5px;color:#ddd;padding:5px}
+.comparison-mode-bar input {accent-color:#bcbcbc}
+body.comparing .viewer-stage,body.comparing .comparison-view {margin-bottom:var(--comparison-controls-height,120px)}
+body.comparing:is([data-comparison-mode="wipe"],[data-comparison-mode="blend"],[data-comparison-mode="toggle"]) .viewer-stage {width:100%!important}
+body.comparing:is([data-comparison-mode="wipe"],[data-comparison-mode="blend"],[data-comparison-mode="toggle"]) .comparison-view {width:100%;border-left:0}
+body.comparing[data-comparison-mode="wipe"] .comparison-view {clip-path:inset(0 0 0 var(--comparison-split,50%))}
+body.comparing[data-comparison-mode="wipe"] .comparison-view > span {left:auto;right:12px}
+body.comparing[data-comparison-mode="wipe"] .comparison-view::before {content:'';position:absolute;left:var(--comparison-split,50%);top:0;bottom:0;width:1px;background:#fff;z-index:3;pointer-events:none}
+body.comparing[data-comparison-mode="blend"] .comparison-view {background:transparent}
+body.comparing[data-comparison-mode="blend"] .comparison-view :is(canvas,video) {opacity:var(--comparison-opacity,.5)}
+body.comparing[data-comparison-mode="blend"] .viewer-stage::after {display:none}
+body.comparing[data-comparison-mode="toggle"][data-comparison-source="a"] .comparison-view {visibility:hidden;pointer-events:none}
+.comparison-wipe-overlay {display:none;grid-area:viewer;position:relative;min-width:0;min-height:0;width:100%;margin-bottom:var(--comparison-controls-height,120px);z-index:4;pointer-events:none}
+body.comparing[data-comparison-mode="wipe"] .comparison-wipe-overlay {display:block}
+.comparison-wipe-handle {position:absolute;left:clamp(0px,calc(var(--comparison-split,50%) - 12px),calc(100% - 24px));top:0;bottom:0;width:24px;padding:0;border:0;background:transparent;cursor:ew-resize;touch-action:none;pointer-events:auto;-webkit-app-region:no-drag}
+.comparison-wipe-handle:focus-visible {outline:1px solid #ffffff80;outline-offset:-10px}

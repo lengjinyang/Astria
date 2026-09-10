@@ -55,6 +55,18 @@ path uses mpv's renderer settings. Shared textures are tagged gamma 2.4;
 software frames are converted to sRGB for canvas compositing by WebGL2.
 Both paths expose an original-dimension compositing canvas to review tools.
 
+`core-patches/astria_ass_alloc.h` bridges public ASS style/event string ownership:
+the bundled libass allocates in legacy `msvcrt.dll`, whereas mpv uses UCRT.
+These strings must be allocated and freed with libass's allocator. SDK preparation
+patches the seven allocation/free sites in `ass_mp.c`, `sd_ass.c` and
+`osd_libass.c` and verifies the dependency's CRT before applying the bridge.
+Changing libass to a UCRT build requires updating this bridge and rebuilding mpv.
+Run `npm run check:playback` to exercise actual subtitle rendering and destruction.
+The software render target is opaque RGB0 (returned to JavaScript as RGBA with
+alpha 255). This avoids an unsupported straight/premultiplied-alpha conversion
+in FFmpeg 6 when blending subtitles. GPU and software paths both render subtitles.
+Set `ASTRIA_MPV_LOG=1` for verbose core diagnostics during local troubleshooting.
+
 The build preparation adds MSVC import libraries for the dependency DLLs and
 adapts the resource compiler option to Windows SDK `rc.exe`. The original mpv
 source version is unchanged. Generated files live under `.cache`; runtime

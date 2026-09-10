@@ -7,6 +7,31 @@
   const WORKSPACES_KEY = 'vfx-player-media-workspaces-v02';
   const PREFERENCES_KEY = 'vfx-player-preferences-v02';
   const desktopAPI = window.desktopAPI || null;
+  // Dismiss floating panels before an outside press reaches playback controls.
+  let dismissingPanelPress = false;
+  window.addEventListener('pointerdown', event => {
+    dismissingPanelPress = false;
+    if (event.button !== 0 && event.button !== 2) return;
+    const modal = document.querySelector('.modal-backdrop.open');
+    const panels = modal ? [modal] : [...document.querySelectorAll('.resource-browser:not([hidden]), .scope-panel:not([hidden])')];
+    if (!panels.length || panels.some(panel => (panel.matches('.modal-backdrop') ? panel.querySelector('[role="dialog"]') : panel)?.contains(event.target))) return;
+    dismissingPanelPress = true;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    for (const panel of panels) {
+      const closeButton = panel.matches('.scope-panel')
+        ? panel.querySelector(':scope > header > button')
+        : panel.querySelector('#resourceClose, #closeHelpBtn, #closeContactSheetBtn');
+      closeButton?.click();
+    }
+  }, true);
+  for (const type of ['pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu']) {
+    window.addEventListener(type, event => {
+      if (!dismissingPanelPress || !event.isTrusted) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+  }
   desktopAPI?.startupMark?.('renderer.script-start');
   // The native window owns the launch fade. Keep renderer pixels opaque so
   // its backing surface is already complete before it becomes visible.
@@ -22,7 +47,7 @@
   let desktopData = null;
   const DEFAULT_SHORTCUTS = Object.freeze({
     togglePlay: 'Space', previousFrame: 'D', nextFrame: 'F', loopIn: 'I', loopOut: 'O', bookmark: 'M',
-    luma: 'G', pixelInspector: 'X', toggleGuides: 'H', cleanMode: 'P', togglePanel: 'F2', resetView: 'Ctrl+0', resetTimeline: 'Alt+0'
+    luma: 'G', pixelInspector: 'Shift+X', toggleGuides: 'H', cleanMode: 'P', togglePanel: 'F2', resetView: 'Ctrl+0', resetTimeline: 'Alt+0'
   });
   const SHORTCUT_ACTIONS = Object.freeze({
     togglePlay: () => playback.paused && !state.isReverse ? play() : pause(),
@@ -228,7 +253,7 @@
     }
     els.speedRange.value = state.playbackSpeed;
     els.speedNumber.value = state.playbackSpeed.toFixed(2);
-    if (persist) persistPreferences();
+    if (persist) { persistPreferences(); window.playerFeatures?.notice(`${state.playbackSpeed.toFixed(2)}×`); }
   }
   function setTimelinePreviewSize(value, persist = false) {
     const numeric = Number(value);
@@ -421,7 +446,7 @@
       gl.uniform1i(renderer.lumaUniform,state.lumaMode?1:0);gl.uniform1f(renderer.contrastUniform,state.lumaContrast);gl.drawArrays(gl.TRIANGLES,0,6);els.colorCanvas.classList.add('active');sampleAmbient(els.colorCanvas);
     }catch(error){console.warn('Color view unavailable',error);state.colorPreset='original';els.colorCanvas.classList.remove('active');$('#colorPresetSelect').value='original';toast('GPU 不可用，已回到原始显示');}
   }
-  function scheduleColorRender(){if(state.colorPreset==='original'){sampleAmbient();return;}if(state.colorRenderPending)return;state.colorRenderPending=true;requestAnimationFrame(renderColorView);}
+  function scheduleColorRender(){window.playerFeatures?.refreshScope();if(state.colorPreset==='original'){sampleAmbient();return;}if(state.colorRenderPending)return;state.colorRenderPending=true;requestAnimationFrame(renderColorView);}
   function setColorPreset(preset,persist=true){state.colorPreset=COLOR_PRESETS[preset]?preset:'original';$('#colorPresetSelect').value=state.colorPreset;$('#colorPresetWarning').classList.toggle('show',state.colorPreset!=='original');els.colorCanvas.classList.toggle('active',state.colorPreset!=='original');if(state.colorPreset==='original')state.colorRenderer&&(state.colorRenderer.preset=null);else scheduleColorRender();if(persist)saveWorkspace();toast(`色彩查看 · ${COLOR_PRESETS[state.colorPreset]}`);}
 
   function renderCompositionGuides(){const on=state.guidesMaster;els.guides.classList.toggle('show-thirds',on&&state.guideThirds);els.guides.classList.toggle('show-golden',on&&state.guideGolden);els.guides.classList.toggle('show-spiral',on&&state.guideSpiral);$('#spiralGuides').setAttribute('transform',`rotate(${state.guideSpiralRotation} 500 500)`);els.guides.classList.toggle('show-center',on&&state.guideCenter);els.guides.classList.toggle('show-diagonal',on&&state.guideDiagonal);els.guides.classList.toggle('show-triangle',on&&state.guideTriangle);els.guides.classList.toggle('show-symmetry',on&&state.guideSymmetry);els.guides.classList.toggle('show-action',on&&state.guideActionSafe);els.guides.classList.toggle('show-title',on&&state.guideTitleSafe);els.guides.classList.toggle('show-mask',on&&state.guideAspect!=='off');els.guides.style.setProperty('--guide-opacity',state.guideOpacity);els.guides.style.setProperty('--guide-mask',state.guideMaskStrength);const ratios={'16:9':16/9,'1.85':1.85,'2.39':2.39,'4:3':4/3,'1:1':1,'9:16':9/16};const target=ratios[state.guideAspect];if(target&&playback.videoWidth){const source=playback.videoWidth/playback.videoHeight;let x=0,y=0,w=1000,h=1000;if(target>source){h=1000*source/target;y=(1000-h)/2;}else{w=1000*target/source;x=(1000-w)/2;}$('#aspectMaskPath').setAttribute('d',`M0 0H1000V1000H0Z M${x} ${y}H${x+w}V${y+h}H${x}Z`);}}
@@ -524,7 +549,7 @@
       event.clientY >= triggerTop && event.clientY <= triggerBottom) || (revealed && !!event.target?.closest?.('.topbar'));
     refreshClassicTopbar();
   }
-  function heldTopbar() { return state.cleanMode ? $('.clean-window-controls').matches(':focus-within') : $('.topbar').matches(':has(details[open], .export-menu.open, :focus-visible)'); }
+  function heldTopbar() { return state.cleanMode ? $('.clean-window-controls').matches(':focus-within') : $('.topbar').matches(':has(details[open], .export-menu.open, .playback-feature-button[aria-expanded="true"], :focus-visible)'); }
   function setClassicWindowPointer(inside) {
     if (!inside) { clearTimeout(classicRevealTimer); classicRevealTimer = null; }
     clearTimeout(classicWindowExitTimer);
@@ -2774,6 +2799,9 @@
         });
       }
       if (state.shortcuts.resetTimeline === 'Ctrl+Shift+0') state.shortcuts.resetTimeline = DEFAULT_SHORTCUTS.resetTimeline;
+      for (const action of Object.keys(state.shortcuts)) {
+        if (['X', 'C'].includes(state.shortcuts[action])) state.shortcuts[action] = DEFAULT_SHORTCUTS[action];
+      }
       const savedVolume = Number(preferences.volume);
       state.volume = Number.isFinite(savedVolume) ? clamp(savedVolume, 0, 1) : 1;
       state.muted = preferences.muted === true;
@@ -3214,6 +3242,7 @@
     }
     if (e.target.closest('.clean-window-controls')) return;
     if (!playback.duration || e.button !== 0) return;
+    pendingViewerClick = false;
     state.scrub={pointerId:e.pointerId,startX:e.clientX,startY:e.clientY,startFrame:currentFrame(),lastFrame:currentFrame(),dragging:false,wasPlaying:state.timelineSeek.resumeAfterSeek==='play'||(!playback.paused && !state.isReverse),wasReverse:state.isReverse||state.timelineSeek.resumeAfterSeek==='reverse'};
     state.timelineSeek.resumeAfterSeek=null;
     els.viewerStage.setPointerCapture(e.pointerId);
@@ -3231,6 +3260,8 @@
     state.scrub.lastFrame=clamp(next,0,lastFrame()); queueResponsiveSeek(state.scrub.lastFrame);
   }
 
+  let pendingViewerClick = false;
+  let viewerClickPlaybackState = null;
   function endScrub(e) {
     if (!state.scrub || (e?.pointerId !== undefined && e.pointerId !== state.scrub.pointerId)) return;
     const { dragging: wasDragging, wasPlaying, wasReverse } = state.scrub;
@@ -3239,8 +3270,7 @@
     if (wasDragging) {
       finishResponsiveScrub({ wasPlaying, wasReverse });
     } else if (e?.type !== 'pointercancel') {
-      playback.paused&&!state.isReverse?play():pause();
-      scheduleCleanControlsHide();
+      pendingViewerClick = true;
     }
   }
 
@@ -3693,6 +3723,22 @@
     els.viewerStage.addEventListener('pointerdown',beginScrub); els.viewerStage.addEventListener('pointermove',moveScrub); els.viewerStage.addEventListener('pointerup',endScrub); els.viewerStage.addEventListener('pointercancel',endScrub);
     els.viewerStage.addEventListener('pointerdown',beginViewerPan); els.viewerStage.addEventListener('pointermove',moveViewerPan); els.viewerStage.addEventListener('pointerup',endViewerPan); els.viewerStage.addEventListener('pointercancel',endViewerPan);
     els.viewerStage.addEventListener('pointerdown',beginQuickAnnotation); els.viewerStage.addEventListener('pointermove',moveQuickAnnotation); els.viewerStage.addEventListener('pointerup',endQuickAnnotation); els.viewerStage.addEventListener('pointercancel',endQuickAnnotation);
+    els.viewerStage.addEventListener('click',event=>{
+      if(!pendingViewerClick)return;
+      pendingViewerClick=false;
+      // Respond to the first click immediately. A second click restores the
+      // original playback state before dblclick toggles window maximization.
+      if(event.detail===2&&viewerClickPlaybackState){
+        const original=viewerClickPlaybackState;
+        original.reverse?reverse():original.playing?play():pause();
+      }else{
+        viewerClickPlaybackState={playing:!playback.paused,reverse:state.isReverse};
+        playback.paused&&!state.isReverse?play():pause();
+      }
+      scheduleCleanControlsHide();
+    });
+    els.viewerStage.addEventListener('dblclick',event=>{if(event.target.closest('button,input,.clean-window-controls')||state.pixelInspector)return;event.preventDefault();desktopAPI?.toggleMaximizeWindow();});
+    playback.addEventListener('loading',()=>{pendingViewerClick=false;viewerClickPlaybackState=null;});
     els.viewerStage.addEventListener('contextmenu',e=>e.preventDefault());
     els.viewerStage.addEventListener('wheel',handleViewerWheel,{passive:false});
     els.viewerStage.addEventListener('pointermove',inspectPixel);
@@ -3946,7 +3992,7 @@
       if (e.key === 'Escape') { finishShortcutRecording(); return; }
       const shortcut = shortcutFromEvent(e);
       if (!shortcut) return;
-      const reserved = new Set(['Ctrl+O','Ctrl+S','Ctrl+F','Ctrl+C','Ctrl+Shift+C','Ctrl+Z','Ctrl+A','Delete','Escape','ArrowLeft','ArrowRight','Shift+ArrowLeft','Shift+ArrowRight','J','K','L','Shift+I','Shift+O']);
+      const reserved = new Set(['X','C','Ctrl+O','Ctrl+S','Ctrl+F','Ctrl+C','Ctrl+Shift+C','Ctrl+Z','Ctrl+A','Delete','Escape','ArrowLeft','ArrowRight','Shift+ArrowLeft','Shift+ArrowRight','J','K','L','Shift+I','Shift+O']);
       if (reserved.has(shortcut)) { toast('该快捷键由系统操作保留'); finishShortcutRecording(); return; }
       finishShortcutRecording(shortcut); return;
     }
@@ -3959,6 +4005,7 @@
     if (e.key==='Escape'&&els.radialMenu.classList.contains('open')){e.preventDefault();hideAnnotationRadialMenu();return;}
     if (e.key==='Escape'&&state.pendingTextAnnotation){e.preventDefault();cancelTextAnnotation();return;}
     if (e.key==='Escape'&&state.pixelInspectorLocked){e.preventDefault();unlockPixelInspector(true);toast('像素取样已解除锁定');return;}
+    if (e.key==='Escape'&&document.body.classList.contains('window-fullscreen')){e.preventDefault();$('#fullscreenBtn').click();return;}
     if (e.key==='Escape'&&state.cleanMode){e.preventDefault();setCleanMode(false);return;}
     if ((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='o'){e.preventDefault();requestOpenVideo();return;}
     if ((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();saveWorkspace(true);return;}
@@ -3972,6 +4019,7 @@
     if ((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!typing){e.preventDefault();undoAnnotation();return;}
     if ((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='a'&&!typing){e.preventDefault();state.selectedBookmarkIds=state.bookmarks.map(b=>b.id);renderBookmarks();renderTimeline();return;}
     if (typing) { if(e.key==='Escape')document.activeElement.blur(); return; }
+    if(!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey&&['x','c'].includes(e.key.toLowerCase())) {e.preventDefault();setPlaybackSpeed(state.playbackSpeed+(e.key.toLowerCase()==='x'?-.05:.05),true);return;}
     const shortcut = shortcutFromEvent(e);
     const action = Object.keys(state.shortcuts).find(name => state.shortcuts[name] === shortcut);
     if (action && SHORTCUT_ACTIONS[action]) { e.preventDefault(); SHORTCUT_ACTIONS[action](); return; }
@@ -3986,6 +4034,7 @@
 
   await loadWorkspace(); bindEvents(); setMediaReady(false); renderBookmarks(); renderAnnotationList(); syncNotes(); updateUI();
   await initializeDesktopRuntime(desktopBootstrap);
+  window.playerFeatures = window.createPlayerFeatures?.({ playback, state, toast, resize: scheduleLayoutRefresh, exitClean: () => setCleanMode(false), subtitleChanged: () => { clearFrameCache(); disposeTimelinePreview(); startFrameCacheLoop(); }, source: () => state.colorPreset !== 'original' ? els.colorCanvas : playback.currentFrameCanvas });
   scheduleBuiltInColorLutPreload();
   if (window.__astriaPlayback) {
     window.__astriaResponsiveSeekTest = {

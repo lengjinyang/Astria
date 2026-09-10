@@ -106,7 +106,7 @@
     const fragment = document.createDocumentFragment();
     function append(item, depth) {
       const row = document.createElement('div'); row.className = 'resource-tree-row';
-      row.style.paddingLeft = `${depth * 14}px`;
+      row.style.paddingLeft = `${depth * 10}px`;
       const arrow = document.createElement('button'); arrow.type = 'button';
       arrow.append(makeIcon(expanded.get(item.path) ? 'expanded' : 'chevron'));
       arrow.setAttribute('aria-label', `${expanded.get(item.path) ? '折叠' : '展开'} ${item.name}`);

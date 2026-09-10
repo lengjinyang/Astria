@@ -26,7 +26,7 @@ The bridge source and its build instructions must accompany a distribution.
 No application integrity check prohibits replacing these dynamic libraries.
 
 The bundled mpv DLL is built by Astria from v0.41.0, with an LGPL software
-color-output extension in native/core-patches. Its dependency DLLs originate
+color-output extension and ASS string allocator bridge in native/core-patches. Its dependency DLLs originate
 from the SHA-256-pinned Paxton-PKJ/libmpv Windows archive, built at commit
 4aec8f7e9e4cff9e2d997ca8574b220d9de1c432. That archive's mpv 0.38.0 is not used.
 The actual FFmpeg license query returns LGPL version 2.1 or later; its build

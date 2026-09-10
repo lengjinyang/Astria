@@ -22,6 +22,7 @@ module.exports=async function sequenceSmoke(window,catalog,app,descriptor){
   fs.copyFileSync(descriptor.path,added);
   try{
     const next=await catalog.describe(descriptor.path);if(next.mediaId!==first.mediaId)throw Error('Unstable sequence ID');
+    console.log('SEQUENCE_REOPEN',JSON.stringify({frames:next.totalFrames,path:next.path}));
     window.webContents.send('vfx:open-video-from-system',next);
     const restored=await window.webContents.executeJavaScript(`new Promise((resolve,reject)=>{const start=Date.now();const tick=()=>{const p=window.__astriaPlayback;if(p.readyState>=2&&p.media.totalFrames===5)resolve({fps:p.media.fps,source:p.media.sourceFrameOffset,bookmarks:document.querySelectorAll('.bookmark-card').length});else if(Date.now()-start>8000)reject(new Error('Restore timeout'));else setTimeout(tick,25)};tick();})`);
     if(restored.fps!==48||restored.source!==1001||restored.bookmarks!==first.bookmarks)throw Error('Sequence workspace restore failed '+JSON.stringify(restored));

@@ -167,6 +167,9 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
       InstanceMethod("seek", &MpvPlayer::Seek),
       InstanceMethod("step", &MpvPlayer::Step),
       InstanceMethod("setSpeed", &MpvPlayer::SetSpeed),
+      InstanceMethod("tracks", &MpvPlayer::Tracks),
+      InstanceMethod("configureTrack", &MpvPlayer::ConfigureTrack),
+      InstanceMethod("addSubtitle", &MpvPlayer::AddSubtitle),
       InstanceMethod("setMuted", &MpvPlayer::SetMuted),
       InstanceMethod("setFps", &MpvPlayer::SetFps),
       InstanceMethod("getInfo", &MpvPlayer::GetInfo),
@@ -229,8 +232,8 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
       return "mpv_create failed";
     }
 
-    set_option("terminal", "no");
-    set_option("msg-level", "all=warn");
+    set_option("terminal", std::getenv("ASTRIA_MPV_LOG") ? "yes" : "no");
+    set_option("msg-level", std::getenv("ASTRIA_MPV_LOG") ? "all=v" : "all=warn");
     set_option("input-default-bindings", "no");
     set_option("audio-display", "no");
     set_option("pause", "yes");
@@ -242,13 +245,15 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
     set_option("ytdl", "no");
     set_option("input-terminal", "no");
     set_option("input-vo-keyboard", "no");
-    set_option("autoload-files", "no");
+    set_option("autoload-files", "yes");
+    set_option("audio-file-auto", "no");
     set_option("access-references", "no");
     set_option("demuxer-lavf-o", "protocol_whitelist=[file]");
     set_option("hwdec", "auto-safe");
     set_option("cache", "yes");
     set_option("demuxer-max-bytes", "268435456");
     set_option("demuxer-max-back-bytes", "134217728");
+    set_option("sub-auto", "fuzzy");
     set_option("target-prim", "bt.709");
     set_option("target-trc", "bt.1886");
     set_option("target-peak", "100");
@@ -543,6 +548,41 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
     if (ret < 0) throw_mpv_error(info.Env(), "step", ret);
     return info.Env().Undefined();
   }
+  Napi::Value Tracks(const Napi::CallbackInfo& info) {
+    auto result = Napi::Array::New(info.Env());
+    mpv_node node{};
+    if (mpv_get_property(handle_, "track-list", MPV_FORMAT_NODE, &node) < 0) return result;
+    if (node.format == MPV_FORMAT_NODE_ARRAY) {
+      for (int i = 0; i < node.u.list->num; ++i) {
+        auto item = Napi::Object::New(info.Env());
+        const auto& track = node.u.list->values[i];
+        if (track.format != MPV_FORMAT_NODE_MAP) continue;
+        for (int j = 0; j < track.u.list->num; ++j) {
+          const auto& value = track.u.list->values[j]; const char* key = track.u.list->keys[j];
+          if (value.format == MPV_FORMAT_STRING) item.Set(key, value.u.string);
+          else if (value.format == MPV_FORMAT_INT64) item.Set(key, static_cast<double>(value.u.int64));
+          else if (value.format == MPV_FORMAT_FLAG) item.Set(key, value.u.flag != 0);
+        }
+        result.Set(i, item);
+      }
+    }
+    mpv_free_node_contents(&node); return result;
+  }
+  Napi::Value ConfigureTrack(const Napi::CallbackInfo& info) {
+    std::string key = info[0].As<Napi::String>();
+    if (key != "aid" && key != "sid" && key != "audio-delay" && key != "sub-delay" && key != "sub-scale") {
+      Napi::Error::New(info.Env(), "Unsupported track setting").ThrowAsJavaScriptException(); return info.Env().Undefined();
+    }
+    std::string value = info[1].As<Napi::String>();
+    int ret = mpv_set_property_string(handle_, key.c_str(), value.c_str());
+    if (ret < 0) throw_mpv_error(info.Env(), key.c_str(), ret);
+    return info.Env().Undefined();
+  }
+  Napi::Value AddSubtitle(const Napi::CallbackInfo& info) {
+    int ret = command({"sub-add", info[0].As<Napi::String>().Utf8Value(), "select"});
+    if (ret < 0) throw_mpv_error(info.Env(), "sub-add", ret);
+    return info.Env().Undefined();
+  }
   Napi::Value SetSpeed(const Napi::CallbackInfo& info) {
     double value = info[0].As<Napi::Number>().DoubleValue();
     int ret = mpv_set_property(handle_, "speed", MPV_FORMAT_DOUBLE, &value);
@@ -565,7 +605,7 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
   }
   Napi::Value GetInfo(const Napi::CallbackInfo& info) {
     auto result = Napi::Object::New(info.Env());
-    for (const char* key : {"width", "height", "duration", "time-pos", "container-fps"}) {
+    for (const char* key : {"width", "height", "duration", "time-pos", "container-fps", "audio-delay", "sub-delay", "sub-scale"}) {
       double value = 0;
       if (mpv_get_property(handle_, key, MPV_FORMAT_DOUBLE, &value) >= 0) result.Set(key, value);
     }
@@ -650,7 +690,10 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
     auto rgba = Napi::Buffer<uint8_t>::New(env, rgba_size);
     int size[2] = {width, height};
     size_t stride = static_cast<size_t>(width) * 4;
-    char format[] = "rgba";
+    // This is an opaque video surface. RGB0 avoids mpv's RGBA subtitle
+    // premultiplication path, which needs an alpha-capable scaler unavailable
+    // in the bundled FFmpeg 6 build. Supply opaque alpha to JS after blending.
+    char format[] = "rgb0";
 
     mpv_render_param params[] = {
       {MPV_RENDER_PARAM_SW_SIZE, size},
@@ -667,6 +710,7 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
       return env.Null();
     }
 
+    for (size_t i = 3; i < rgba_size; i += 4) rgba.Data()[i] = 255;
     Napi::Object frame = Napi::Object::New(env);
     frame.Set("width", width);
     frame.Set("height", height);

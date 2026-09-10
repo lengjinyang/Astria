@@ -25,7 +25,7 @@
     "libiconv-2.dll": "bdec7b9d1f63eafda352e2abaab7ce63f26ece8b0eb08563887dd364eaefaf92",
     "libintl-8.dll": "053619b17a082a055eb0d36e9c0d657c073a1dafaa5fddf686d149fe3cbd49d6",
     "liblzma-5.dll": "baff57ef3f67e2e3e47c28aaaab537bf9e80a4f86e13fad0dc9e651f586c2297",
-    "libmpv-2.dll": "219c9ddeb25db2361b28aa7358683b90add9bed881d61ecc9f27f8a259b54074",
+    "libmpv-2.dll": "4e73da543e1a640f0ff7969a46010bf30e9f7a653311c0aaf91c488b352b40a4",
     "libpcre2-8-0.dll": "fdc4501f0d397ddc5afbe2fd6ff2c3d92fd4cbf3bef73f8467c60546f15901f0",
     "libplacebo-338.dll": "80bbeab5a6ee3f658e04083cd6e519c0e4b4fc78b963b3ecb123cda47a569b41",
     "libpng16-16.dll": "9ee9e7cabaaa80733c675c3e26cdb8eaf119eae8ddbdeab073f41b1d69e6e371",
@@ -44,6 +44,6 @@
     "vcruntime140_1.dll": "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f",
     "vcruntime140_threads.dll": "219915cf20822f34d5e7c1fdd4e21ae7f3396881096c51036225fb8f84b47afa",
     "zlib1.dll": "02e041c4b7c4cafba56851e04315ac3925ac82f89d20ef701e533515a18433e1",
-    "astria_mpv.node": "4555869131b6f62538b64ae4b9ccb7d024837f5e7f66507a3fdf98b16d42e649"
+    "astria_mpv.node": "8aba545ccfea33570ab18d847be00eb8b9470e6772ca8f6a0dd8e1a45f789228"
   }
 }

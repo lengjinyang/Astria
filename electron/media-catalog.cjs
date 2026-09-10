@@ -45,8 +45,6 @@ class MediaCatalog {
       const sequence = { directory: directory.toLowerCase(), prefix: (match?.[1] || path.parse(name).name).toLowerCase(),
         digits: match?.[2].length || 0, extension, single: !match };
       descriptor.mediaId = 'sequence:' + createHash('sha256').update(JSON.stringify(sequence)).digest('hex');
-      const activeEntry = this.entries.get(descriptor.mediaId);
-      if (activeEntry?.consumers.size) return activeEntry.descriptor;
       const numbered = new Map();
       if (match) {
         for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
@@ -78,7 +76,19 @@ class MediaCatalog {
       descriptor.mediaId = 'video:' + createHash('sha256').update(JSON.stringify(identity)).digest('hex');
     }
     const previousEntry = this.entries.get(descriptor.mediaId);
-    if (previousEntry?.consumers.size) return previousEntry.descriptor;
+    if (previousEntry?.consumers.size) {
+      if (sequenceFiles) {
+        // Rescan explicitly reopened sequences while retaining manifests still
+        // referenced by active A/B sessions until their final release.
+        if (previousEntry.manifestPromise) await previousEntry.manifestPromise;
+        if (previousEntry.manifest) {
+          previousEntry.retiredManifests ||= [];
+          previousEntry.retiredManifests.push(previousEntry.manifest);
+        }
+        Object.assign(previousEntry, { descriptor, sequenceFiles, manifest: null, manifestPromise: null });
+      }
+      return previousEntry.descriptor;
+    }
     if (previousEntry?.expiry) clearTimeout(previousEntry.expiry);
     if (previousEntry?.manifest) await fs.unlink(previousEntry.manifest).catch(() => {});
     const entry = { descriptor, sequenceFiles, manifest: null, manifestPromise: null, consumers: new Set(), expiry: null };
@@ -123,11 +133,13 @@ class MediaCatalog {
     if (entry.manifestPromise) await entry.manifestPromise.catch(() => {});
     if (entry.consumers.size || this.entries.get(id) !== entry) return;
     if (entry.manifest) await fs.unlink(entry.manifest).catch(() => {});
+    await Promise.all((entry.retiredManifests || []).map(file => fs.unlink(file).catch(() => {})));
     this.entries.delete(id);
   }
   async dispose() {
     for (const entry of this.entries.values()) if (entry.expiry) clearTimeout(entry.expiry);
     await Promise.all([...this.entries.values()].filter(e => e.manifest).map(e => fs.unlink(e.manifest).catch(() => {})));
+    await Promise.all([...this.entries.values()].flatMap(e => e.retiredManifests || []).map(file => fs.unlink(file).catch(() => {})));
     this.entries.clear();
   }
 }
