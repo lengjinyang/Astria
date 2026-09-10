@@ -1,6 +1,6 @@
 # Astria
 
-面向 UE5 特效师、VFX、TA 和动画艺术家的 Windows 视频分析播放器。
+Astria 是一款支持逐帧播放、视频对比与画面分析的 Windows 播放器。
 
 ## 功能
 
