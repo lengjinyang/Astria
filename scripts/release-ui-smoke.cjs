@@ -50,6 +50,29 @@ module.exports = async window => {
   await wait(100);
   await run(`if(Math.abs(Number(document.querySelector('[data-mix] input').value)-75)>1||!window.__astriaPlayback.paused)throw Error('Real wipe drag failed '+JSON.stringify({value:document.querySelector('[data-mix] input').value,paused:window.__astriaPlayback.paused,events:window.__wipeEvents}));`);
   await run(`window.playerFeatures.closeComparison()`);
+  const originalBounds = window.getBounds();
+  const originalMinimum = window.getMinimumSize();
+  try {
+    window.setMinimumSize(320,180);
+    window.setSize(640,400);
+    await run(`document.getElementById('scopeOpen').click()`);
+    await wait(150);
+    await run(`(()=>{
+      const panel=document.querySelector('.scope-panel');
+      for(const comparing of [false,true]){
+        document.body.classList.toggle('comparing',comparing);
+        const r=panel.getBoundingClientRect(),close=panel.querySelector('header button').getBoundingClientRect();
+        if(r.top<32||r.bottom>innerHeight||r.left<0||r.right>innerWidth||close.top<r.top||close.bottom>r.bottom)throw Error('Scope or close button escaped small viewport');
+      }
+      document.body.classList.remove('comparing');
+      panel.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+      if(!panel.hidden||document.activeElement!==document.querySelector('#reviewMenu > summary'))throw Error('Scope dismissal lost keyboard focus');
+    })()`);
+  } finally {
+    await run(`document.body.classList.remove('comparing')`);
+    window.setBounds(originalBounds);
+    window.setMinimumSize(...originalMinimum);
+  }
   for(const button of ['left','right']) {
     const point = await run(`(()=>{
       const panel=document.querySelector('.resource-browser');
@@ -59,5 +82,5 @@ module.exports = async window => {
     click(point,button);await wait(120);
     await run(`if(!document.querySelector('.resource-browser').hidden||!window.__astriaPlayback.paused)throw Error('Outside ${button} dismissal failed');`);
   }
-  console.log('RELEASE_UI_PASS modes, reset, real wipe drag, left/right outside dismissal');
+  console.log('RELEASE_UI_PASS modes, reset, real wipe drag, small viewport scopes, scope focus return, left/right outside dismissal');
 };

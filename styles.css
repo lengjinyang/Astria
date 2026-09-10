@@ -115,7 +115,7 @@ body.media-ready #ambientCanvas.active { opacity: .45; }
 .recent-media-item:hover { color: #e8edf2; background: #1b2128; }
 .recent-media-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .recent-media-item small { margin: 0; color: #59636e; font: 7px/1 ui-monospace, monospace; }
-.desktop-runtime .viewer-empty > small { color: #68727d; }
+.desktop-runtime .viewer-empty > small { color: var(--muted); }
 .primary-button { border: 1px solid #758091; color: #f4f6f8; background: #596474; border-radius: 9px; padding: 9px 14px; font-weight: 650; font-size: 12px; cursor: pointer; box-shadow: 0 4px 16px rgba(0,0,0,.22); }
 .primary-button span { margin-left: 13px; padding-left: 11px; border-left: 1px solid rgba(0,0,0,.25); font-size: 9px; letter-spacing: .1em; }
 .annotation-toolbar { position: relative; display: flex; align-items: center; height: 30px; padding: 2px; background: #0d1014; border: 1px solid #303740; border-radius: 9px; box-shadow: inset 0 1px 0 rgba(255,255,255,.025); }
@@ -2776,6 +2776,10 @@ body .topbar :is(#reviewMenu, #topMore) > summary svg {
 }
 .topbar .review-menu .review-tool-label,
 .topbar .review-menu .top-tool-button > span { display: inline; }
+.review-tool-group { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.review-tool-group[hidden] { display: none; }
+.review-tool-group + .review-tool-group { margin-top: 5px; padding-top: 7px; border-top: 1px solid var(--chrome-line); }
+.review-tool-group > h2 { margin: 0; padding: 5px 9px 3px; color: var(--muted); font: 500 11px/1.5 "Segoe UI","Microsoft YaHei",sans-serif; }
 .topbar .review-menu :is(.luma-button,.pixel-inspector-button,.top-tool-button) {
   width: 100%; min-height: 32px; justify-content: flex-start; gap: 10px; padding: 0 9px; font-size: 12px;
 }
@@ -3077,7 +3081,11 @@ body.comparing .viewer-stage::after {content:'A · 当前视频';position:absolu
 .feature-fields legend {display:none}
 .feature-fields label {display:flex;align-items:center;justify-content:space-between;gap:8px;margin:9px 0}
 .feature-fields input {width:90px}
-.feature-fields :is(button,input,select) {background:#333;color:#ddd;border:1px solid #555;border-radius:4px;padding:5px}
+.feature-fields :is(button,input,select) {background:var(--ui-field);color:var(--text);border:1px solid var(--chrome-line);border-radius:var(--control-radius);padding:6px 8px;min-height:30px;font:inherit}
+.feature-fields select {max-width:100%;min-width:0;background:var(--chrome-raised)}
+.feature-fields button {cursor:pointer}
+.feature-fields button:hover {background:var(--chrome-hover);border-color:rgba(255,255,255,.22)}
+.feature-fields button:disabled {opacity:.45;cursor:default}
 .feature-fields small {display:block;color:#aaa;line-height:1.6;margin-top:8px}
 .playback-tools fieldset[hidden],.playback-feature-button[hidden] {display:none!important}
 body .topbar .playback-feature-button svg {width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.85;stroke-linecap:round;stroke-linejoin:round}
@@ -3091,21 +3099,23 @@ body .topbar .playback-feature-button svg {width:16px;height:16px;fill:none;stro
 .comparison-controls output {max-width:30%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 body.comparing .viewer-stage,.comparison-view {margin-bottom:52px}
 .comparison-view[data-out-of-range=true]::after {bottom:14px}
-.scope-panel {width:min(740px,calc(100vw - 32px));background:#181a1c}
+.scope-panel {--scope-bottom:min(64px,12dvh);width:min(740px,calc(100vw - 32px));bottom:var(--scope-bottom);max-height:calc(100dvh - var(--scope-bottom) - 44px);overflow:auto;overscroll-behavior:contain;background:var(--chrome-surface);border-color:var(--chrome-line);border-radius:var(--popover-radius);box-shadow:var(--ui-glass-shadow);padding:14px}
+.scope-panel > header {position:sticky;top:-14px;z-index:1;background:var(--chrome-surface);padding:8px 0;margin-top:-8px}
+.scope-panel > header > button {min-height:28px;padding:4px 10px;border-color:var(--chrome-line);border-radius:var(--control-radius);background:var(--ui-field);cursor:pointer}
+.scope-panel > header > button:hover {background:var(--chrome-hover);color:var(--text)}
 .scope-options {display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
 .scope-options label {display:flex;align-items:center;gap:5px;font-size:11px;color:#aaa}
 .scope-options select {background:#282b2e;color:#ccc;border:1px solid #414447;border-radius:4px;padding:4px}
 .scope-options input[type=range] {width:70px}
 .scope-panel small {display:block;color:#969b9f;font:10px monospace;margin-top:6px}
 
-body.comparing .scope-panel {bottom:120px}
+body.comparing .scope-panel {--scope-bottom:min(152px,25dvh);bottom:var(--scope-bottom)}
 
 .comparison-controls {flex-wrap:wrap;gap:8px 12px;min-height:76px}
 .comparison-controls .comparison-timeline {flex:1 0 100%;display:flex;gap:12px;min-width:0;margin:0}
 .comparison-timeline input[type=range] {flex:1;min-width:80px;width:auto;padding:0;accent-color:#bcbcbc;cursor:ew-resize}
 .comparison-timeline output {flex:none;font:11px monospace;max-width:none}
 body.comparing .viewer-stage,body.comparing .comparison-view {margin-bottom:84px}
-body.comparing .scope-panel {bottom:152px}
 
 .scope-tabs {display:flex;gap:5px;flex-wrap:wrap;margin:0 0 10px;padding-bottom:10px;border-bottom:1px solid #ffffff12}
 .scope-panel .scope-tabs button {flex:1;white-space:nowrap;padding:7px 10px;background:transparent;border:1px solid transparent;color:#969da3;cursor:pointer}
@@ -3131,6 +3141,13 @@ body.comparing .scope-panel {bottom:152px}
 
 .scope-panel canvas {aspect-ratio:12 / 5}
 .scope-panel small {font:11px/1.5 "Segoe UI","Microsoft YaHei",sans-serif;color:#aeb4b9}
+
+/* Give the first action and its supporting copy a readable hierarchy. */
+.viewer-empty {max-width:100%;padding:28px clamp(20px,4vw,50px)}
+.viewer-empty h1 {font-size:20px;font-weight:550;line-height:1.5;margin-bottom:8px}
+.viewer-empty p {font-size:13px;line-height:1.7;margin-bottom:22px}
+.viewer-empty > small {max-width:420px;line-height:1.8;text-wrap:balance}
+.viewer-empty .primary-button {min-height:38px;padding:0 18px}
 
 /* Comparison modes share the same synchronized A/B playback. */
 .comparison-mode-bar {display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px 14px;flex:1 0 100%}

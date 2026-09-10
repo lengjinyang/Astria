@@ -2159,8 +2159,14 @@
     state.panelOpen = !!open;
     document.body.classList.toggle('panel-collapsed', !state.panelOpen);
     const toggle = $('#togglePanelBtn');
+    const panel = $('#analysisPanel');
+    // A collapsed inspector must also leave the keyboard focus order.
+    if (!state.panelOpen && panel.contains(document.activeElement)) toggle.focus({ preventScroll: true });
+    panel.inert = !state.panelOpen;
     toggle.classList.toggle('active', state.panelOpen);
     toggle.setAttribute('aria-pressed', String(state.panelOpen));
+    toggle.setAttribute('aria-expanded', String(state.panelOpen));
+    toggle.setAttribute('aria-controls', 'analysisPanel');
     toggle.setAttribute('aria-label', state.panelOpen ? '隐藏分析面板' : '显示分析面板');
     toggle.title = `${state.panelOpen ? '隐藏' : '显示'}分析面板 (F2)`;
     if (state.panelOpen) {
@@ -3016,6 +3022,7 @@
   async function initializeDesktopRuntime(bootstrap = beginDesktopBootstrap()) {
     if (!desktopAPI) return;
     document.body.classList.add('desktop-runtime');
+    $('#supportedFormatsHint').textContent = '支持 MP4、MOV、MXF 等视频，以及 EXR、DPX、PNG 图像序列';
     desktopAPI.onOpenVideo(openDesktopVideo);
     desktopAPI.onCommand(handleDesktopCommand);
     desktopAPI.onWindowState(applyDesktopWindowState);

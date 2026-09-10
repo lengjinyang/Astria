@@ -33,18 +33,18 @@ window.createPlayerFeatures = ({ playback: p, state, toast, resize, exitClean, s
     pin: '<path d="m9 3 6 0-1 6 4 4v2H6v-2l4-4zM12 15v6"/>',
   };
   const svg = key => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[key]}</svg>`;
-  const review = document.querySelector('.review-tool-cluster');
-  function reviewFeature(id, title, icon, content) {
+  function reviewFeature(groupId, id, title, icon, content) {
     const details = document.createElement('details');
     details.id = id;
     details.className = 'top-tool-popover feature-review-tool';
     details.innerHTML = `<summary class="top-tool-button" title="${title}">${svg(icon)}<span>${title}</span><i></i></summary><div class="top-tool-panel feature-fields"></div>`;
     details.lastElementChild.append(content);
-    review.append(details);
+    $(groupId).append(details);
     details.addEventListener('keydown', event => event.stopPropagation());
   }
-  reviewFeature('comparisonTool', 'A/B 视频对比', 'comparison', panel.querySelector('fieldset'));
-  reviewFeature('scopeTool', '视频示波器', 'scope', panel.querySelector('fieldset'));
+  reviewFeature('reviewAnalysisTools', 'comparisonTool', 'A/B 视频对比', 'comparison', panel.querySelector('fieldset'));
+  reviewFeature('reviewAnalysisTools', 'scopeTool', '视频示波器', 'scope', panel.querySelector('fieldset'));
+  $('reviewAnalysisTools').hidden = false;
   const tracks = $('trackTools');
   const audioFields = document.createElement('fieldset');
   audioFields.id = 'audioTools';
@@ -54,8 +54,9 @@ window.createPlayerFeatures = ({ playback: p, state, toast, resize, exitClean, s
   tracks.querySelector('legend').textContent = '字幕';
   $('pinTools').remove();
   panel.querySelector(':scope > small').remove();
-  reviewFeature('subtitleTool', '字幕', 'subtitle', tracks);
-  reviewFeature('audioTool', '音轨与音画同步', 'audio', audioFields);
+  reviewFeature('reviewTrackTools', 'audioTool', '音轨与音画同步', 'audio', audioFields);
+  reviewFeature('reviewTrackTools', 'subtitleTool', '字幕', 'subtitle', tracks);
+  $('reviewTrackTools').hidden = !api;
   for (const id of ['subtitleTool', 'audioTool']) {
     $(id).hidden = !api;
     $(id).addEventListener('toggle', () => { if ($(id).open) void safe(refreshTracks)(); });
@@ -477,7 +478,8 @@ window.createPlayerFeatures = ({ playback: p, state, toast, resize, exitClean, s
   const scope = document.createElement('section');
   scope.className = 'scope-panel';
   scope.hidden = true;
-  scope.innerHTML = `<header><b id="scopeTitle">视频示波器</b><button>关闭</button></header>
+  scope.setAttribute('aria-labelledby', 'scopeTitle');
+  scope.innerHTML = `<header><b id="scopeTitle">视频示波器</b><button aria-label="关闭视频示波器">关闭</button></header>
     <div class="scope-tabs" role="group" aria-label="示波器类型"></div><div class="scope-options"><label>刻度 <select id="scopeUnits"><option value="ire">IRE 0–100</option><option value="code" selected>10-bit 0–1023</option></select></label><label>增益 <input id="scopeGain" type="range" min="0.5" max="4" value="1.5" step="0.1"></label><label><input id="scopeLog" type="checkbox">直方图对数</label></div>
     <canvas width="720" height="300" aria-label="视频信号分布"></canvas><small id="scopeInfo"></small>`;
   document.body.append(scope);
@@ -498,8 +500,17 @@ window.createPlayerFeatures = ({ playback: p, state, toast, resize, exitClean, s
     $('reviewMenu').open=false;
     scopeButtons.get(lastScopeMode).focus();
   };
-  scope.querySelector('button').onclick = () => { $('scopeMode').value = 'off'; scope.hidden = true; };
-  scope.addEventListener('keydown', event => { event.stopPropagation(); if (event.key === 'Escape') scope.querySelector('button').click(); });
+  scope.querySelector('button').onclick = () => {
+    const restoreFocus = scope.contains(document.activeElement);
+    $('scopeMode').value = 'off'; scope.hidden = true;
+    if (restoreFocus) {
+      // The launcher's title bar may have auto-hidden while reading the scope.
+      if (!state.cleanMode) document.body.classList.add('classic-topbar-visible');
+      const target = state.cleanMode ? $('playBtn') : $('reviewMenu').querySelector(':scope > summary');
+      target.focus({ preventScroll: true });
+    }
+  };
+  scope.addEventListener('keydown', event => { event.stopPropagation(); if (event.key === 'Escape') { event.preventDefault(); scope.querySelector('button').click(); } });
   $('scopeMode').onchange = () => {
     scope.hidden = $('scopeMode').value === 'off';
     if(!scope.hidden && scopeButtons.has($('scopeMode').value)){

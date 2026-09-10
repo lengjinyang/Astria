@@ -9,6 +9,10 @@ app.whenReady().then(async()=>{
  console.log('CLEAN_MODE_PASS',await win.webContents.executeJavaScript(`(async()=>{
  const wait=ms=>new Promise(r=>setTimeout(r,ms)),click=id=>document.getElementById(id).click();
  await wait(300);
+ const inspector=document.getElementById('analysisPanel');
+ if(!inspector.inert)throw Error('Initially collapsed inspector is keyboard accessible');
+ document.getElementById('bookmarkSearch').focus();
+ if(inspector.contains(document.activeElement))throw Error('Hidden inspector accepted focus');
  const blob=await(await fetch(${JSON.stringify(url)})).blob(),dt=new DataTransfer();
  dt.items.add(new File([blob],'clean-check.mp4',{type:'video/mp4'}));
  const input=document.getElementById('videoInput');input.files=dt.files;input.dispatchEvent(new Event('change'));await wait(900);
@@ -31,6 +35,11 @@ app.whenReady().then(async()=>{
  if(getComputedStyle(resource).display!=='none')throw Error('Browser visible in clean mode');
  document.dispatchEvent(new KeyboardEvent('keydown',{key:'f',ctrlKey:true,bubbles:true}));
  if(clean()||document.activeElement.id!=='bookmarkSearch')throw Error('Search did not leave clean mode');
+ if(inspector.inert)throw Error('Open inspector is inert');
+ click('closePanelBtn');
+ if(!inspector.inert||document.activeElement.id!=='togglePanelBtn')throw Error('Inspector close did not restore focus');
+ document.getElementById('bookmarkSearch').focus();
+ if(inspector.contains(document.activeElement))throw Error('Collapsed inspector accepted focus');
  document.activeElement.blur();click('cleanModeBtn');
  document.dispatchEvent(new KeyboardEvent('keydown',{key:'F2',bubbles:true}));
  if(clean()||document.body.classList.contains('panel-collapsed'))throw Error('Panel shortcut failed');
