@@ -3002,7 +3002,7 @@
   function beginDesktopBootstrap() {
     desktopAPI?.startupMark?.('renderer.bootstrap');
     if (!desktopAPI) return null;
-    const versionPromise = desktopAPI.getVersion().catch(() => '0.8.7');
+    const versionPromise = desktopAPI.getVersion().catch(() => '0.8.9');
     const windowStatePromise = desktopAPI.getWindowState().catch(() => null);
     const hasLaunchMedia = new URLSearchParams(window.location.search).get('launchMedia') === '1';
     // A file-association launch can initialize libmpv and the shared-texture

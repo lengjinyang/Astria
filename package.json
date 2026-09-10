@@ -1,7 +1,7 @@
 {
   "name": "astria",
   "productName": "Astria",
-  "version": "0.8.8",
+  "version": "0.8.9",
   "description": "Frame-accurate desktop video review player for VFX artists",
   "main": "electron/main.cjs",
   "author": "Astria",

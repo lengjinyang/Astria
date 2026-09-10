@@ -6,7 +6,7 @@ Astria 是一款支持逐帧播放、视频对比与画面分析的 Windows 播�
 
 - 逐帧播放、倒放、变速、时间轴拖动与 A/B 区间循环。
 - 双视频同步对比，支持并排、分屏等对比模式。
-- 波形、直方图、矢量示波器、拾色器和 LUT 查看预设。
+- 波形、直方图、矢量示波器、拾色器和色彩查看预设。
 - 帧书签、文字笔记、画面批注、截图与 Contact Sheet 导出。
 - 字幕、音轨切换及音画同步调整。
 - 支持 ProRes、DNxHR、HEVC、MXF 等视频，以及 EXR、DPX、PNG、JPEG 图像序列。
@@ -16,8 +16,8 @@ Astria 是一款支持逐帧播放、视频对比与画面分析的 Windows 播�
 
 在 [Releases](../../releases/latest) 下载 Windows x64 版本：
 
-- **Astria-Setup-0.8.8.exe**：安装版。
-- **Astria-0.8.8-x64.zip**：解压后运行的便携版。
+- **Astria-Setup-0.8.9.exe**：安装版。
+- **Astria-0.8.9-x64.zip**：解压后运行的便携版。
 
 ## 开发
 
