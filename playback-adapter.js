@@ -48,8 +48,8 @@
     constructor(element) {
       super(); this.api = window.desktopAPI.media; this.surface = document.createElement('canvas');
       if (element) { this.surface.id = element.id; this.surface.className = element.className; element.replaceWith(this.surface); }
-      // The launch poster is a separate 2D surface. Do not block its layout
-      // or native-session IPC on WebGL context creation and shader compilation.
+      // The launch poster has its own surface. Create the video presenter only
+      // when a decoded frame arrives, independently of poster layout/session IPC.
       this.presenter = null;
       this.videoWidth = 0; this.videoHeight = 0; this.duration = 0; this.readyState = 0; this.paused = true; this.seeking = false;
       this.time = 0; this.projectFps = 24; this._volume = 1; this._muted = false; this._speed = 1; this.callbacks = new Map(); this.nextCallback = 0;
@@ -85,12 +85,13 @@
       this.videoWidth = 0; this.videoHeight = 0; this.duration = 0; this.frameStates.clear(); this.renderedFrames.clear();
       this.emit('loading');
       try {
-        await this.call('open', media.mediaId, this.projectFps, Number(media.startTime) || 0);
+        await this.call('open', media.mediaId, this.projectFps, Number(media.startTime) || 0, generation);
         if (generation !== this.generation) return;
         await this.call('setVolume', this._volume); await this.call('setMuted', this._muted); await this.call('setSpeed', this._speed);
       } catch { /* error is emitted by call */ }
     }
     onState(event) {
+      if (Number.isSafeInteger(event.openToken) && event.openToken !== this.generation) return;
       if (event.type === 'metadata') {
         this.backend = event.backend;
         if (Number.isFinite(event.time)) this.time = event.time;
@@ -133,6 +134,7 @@
     }
     resize(width, height) { if (this.surface.width !== width || this.surface.height !== height) { this.surface.width = width; this.surface.height = height; } }
     acceptFrame(frame) {
+      if (Number.isSafeInteger(frame.openToken) && frame.openToken !== this.generation) return false;
       if (frame.purpose === 'capture') return true;
       if (Number.isSafeInteger(frame.frameId) && frame.frameId <= this.lastFrameId) return false;
       if (Number.isSafeInteger(frame.outputRevision) && frame.outputRevision < this.outputRevision) return false;
@@ -249,62 +251,16 @@
       this.canvas = canvas;
       // Commit resize, pixels and page layout together. Low-latency canvas
       // presentation can expose a cleared buffer during native window resizing.
-      const gl = this.gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true, alpha: false, antialias: false, desynchronized: false });
-      if (!gl) {
-        this.context = canvas.getContext('2d', { alpha: false });
-        if (!this.context) throw new Error('画面 Canvas 不可用');
-        return;
-      }
-      const shader = (type, source) => {
-        const value = gl.createShader(type); gl.shaderSource(value, source); gl.compileShader(value);
-        if (!gl.getShaderParameter(value, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(value));
-        return value;
-      };
-      this.program = gl.createProgram();
-      gl.attachShader(this.program, shader(gl.VERTEX_SHADER, '#version 300 es\n out vec2 uv; void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));uv=vec2(p.x,1.-p.y);gl_Position=vec4(p*2.-1.,0,1);}'));
-      gl.attachShader(this.program, shader(gl.FRAGMENT_SHADER, '#version 300 es\n precision highp float;in vec2 uv;uniform sampler2D pixels;out vec4 color;void main(){color=texture(pixels,uv);}'));
-      gl.linkProgram(this.program);
-      if (!gl.getProgramParameter(this.program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(this.program));
-      this.texture = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, this.texture);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      // Canvas already performs the VideoFrame gamma24 -> sRGB conversion on
+      // the GPU. Present that surface directly: a second WebGL passthrough adds
+      // cold context/shader initialization and a full-frame upload every frame.
+      this.context = canvas.getContext('2d', { alpha: false, colorSpace: 'srgb', desynchronized: false });
+      if (!this.context) throw new Error('画面 Canvas 不可用');
     }
     draw(source) {
-      // Normalize native VideoFrames through one explicit sRGB conversion.
-      // Direct VideoFrame uploads can take different Chromium fast paths for
-      // texture allocation and updates; canvas uploads must not reinterpret
-      // the gamma24 metadata again when the output size changes.
-      if (typeof source.displayWidth === 'number' && source.colorSpace) {
-        if (!this.srgbSurface) {
-          this.srgbSurface = document.createElement('canvas');
-          this.srgbContext = this.srgbSurface.getContext('2d', { alpha: false, colorSpace: 'srgb' });
-        }
-        if (this.srgbSurface.width !== source.displayWidth || this.srgbSurface.height !== source.displayHeight) {
-          this.srgbSurface.width = source.displayWidth;
-          this.srgbSurface.height = source.displayHeight;
-        }
-        this.srgbContext.drawImage(source, 0, 0);
-        source = this.srgbSurface;
-      }
-      if (!this.gl) {
-        this.context.drawImage(source, 0, 0, this.canvas.width, this.canvas.height);
-        return;
-      }
-      const gl = this.gl;
-      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-      gl.useProgram(this.program); gl.bindTexture(gl.TEXTURE_2D, this.texture);
-      if (this.textureWidth !== this.canvas.width || this.textureHeight !== this.canvas.height) {
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
-        this.textureWidth = this.canvas.width; this.textureHeight = this.canvas.height;
-      } else gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      this.context.drawImage(source, 0, 0, this.canvas.width, this.canvas.height);
     }
-    destroy() {
-      if (!this.gl) return;
-      this.gl.deleteTexture(this.texture); this.gl.deleteProgram(this.program);
-    }
+    destroy() {}
   }
   class SoftwareFrameUpload {
     constructor() {

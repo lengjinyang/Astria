@@ -31,7 +31,7 @@ contextBridge.exposeInMainWorld('desktopAPI', Object.freeze({
   platform: process.platform,
   media: Object.freeze({
     create: () => ipcRenderer.invoke('media:create'),
-    open: (id, mediaId, fps, startTime = 0) => ipcRenderer.invoke('media:open', id, mediaId, fps, startTime),
+    open: (id, mediaId, fps, startTime = 0, openToken = 0) => ipcRenderer.invoke('media:open', id, mediaId, fps, startTime, openToken),
     play: id => ipcRenderer.invoke('media:play', id),
     pause: id => ipcRenderer.invoke('media:pause', id),
     stop: id => ipcRenderer.invoke('media:stop', id),

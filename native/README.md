@@ -29,6 +29,29 @@ Startup trace `window.shown` now describes the zero-opacity native show;
 `window.full-opacity` is the user-visible reveal. Compare full-opacity times
 between versions rather than the earlier native-show timestamp.
 
+First-open rendering services the `file-loaded` render callback before querying
+properties. Querying synchronously at that event can block the JavaScript thread
+while mpv waits for its first render, triggering its 200 ms VO timeout. A provisional
+render advances the core; its pixels are discarded and its shared-texture slot is
+released. Metadata and visible frames are published after `playback-restart`.
+Each open has a token so frames already in transit cannot overwrite a newly opened
+video or its remembered position.
+
+The shared VideoFrame is drawn directly into an opaque, synchronized sRGB Canvas2D
+surface. Chromium performs the gamma 2.4 to sRGB conversion there; no additional
+WebGL passthrough context, shader compilation, or full-frame upload is needed.
+Software-frame conversion and review-tool WebGL pipelines are unchanged.
+Fast opens show the first picture without a fade; a cancellable loading hint appears
+only if loading lasts more than 700 ms.
+
+Run `npm run check:startup` for render-order/token regressions and an Electron run
+with a fresh profile, no playback poster, autoplay, seeking, opening a second video,
+and restoring the first video's position. Optional media selection:
+`electron scripts/startup-smoke.cjs .cache/media/4k-hevc-8s.mp4`.
+Results and traces are saved under `.cache/startup-smoke-*`. These measure fresh
+application profiles, not cold OS disk/driver caches. Fixtures require
+`.cache/media/h264.mp4` and `.cache/media/prores.mov`.
+
 ## Rebuild libmpv
 
 Prerequisites: Visual Studio 2022 C++ x64 tools and Windows SDK, Node.js,
@@ -51,7 +74,13 @@ The original dependency build recipe at commit
 `core-patches/astria_sdr.h` is an LGPL extension of libmpv's software renderer:
 it retains float RGB through conversion, applies libplacebo primary adaptation
 and BT.2390 tone mapping, then encodes 100-nit Rec.709/BT.1886. The main GPU
-path uses mpv's renderer settings. Shared textures are tagged gamma 2.4;
+path uses mpv's renderer settings with `target-peak=auto`, preserving the
+renderer’s 203-nit SDR reference normalization. Forcing `target-peak=100`
+amplifies ordinary SDR midtones by approximately 2.03 in linear light.
+This parameter is a signal-mapping reference, not a command to set physical
+monitor brightness. HDR continues to use BT.2390 mapping to SDR; the custom
+software path's 100-nit mapping is separate and HDR parity between these paths
+has not been established. Shared textures are tagged gamma 2.4;
 software frames are converted to sRGB for canvas compositing by WebGL2.
 Both paths expose an original-dimension compositing canvas to review tools.
 
@@ -73,6 +102,20 @@ source version is unchanged. Generated files live under `.cache`; runtime
 files live under `native/runtime/win32-x64` and are copied outside ASAR.
 
 ## Packaging
+
+Playback poster cache maintenance runs 30 seconds after startup and every 30
+minutes thereafter. Posters unused for 90 days are removed; above 128 MiB,
+the least recently used posters are removed first. Opening a workspace refreshes
+its poster's access timestamp. The current media and in-flight workspace saves
+are protected, so the limit may be temporarily exceeded. Missing posters fall
+back to normal first-frame loading. Bookmarks, annotations, their images, and
+saved playback positions are retained. This limit applies only to disposable
+playback posters, not Electron caches or review data.
+
+The same maintenance pass removes recognized store `.tmp` files older than 24
+hours only when their owning process is no longer running. Current-process files,
+unrelated temporary files and persisted JSON are retained. Atomic saves also
+attempt to remove their temporary file immediately after a write or rename failure.
 
 `npm run make:win` uses electron-builder; `npm run make:forge` uses Forge.
 Both preflight the toolchain, rebuild the addon, stage Microsoft VC runtime

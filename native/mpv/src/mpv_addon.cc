@@ -256,7 +256,9 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
     set_option("sub-auto", "fuzzy");
     set_option("target-prim", "bt.709");
     set_option("target-trc", "bt.1886");
-    set_option("target-peak", "100");
+    // Let mpv infer the SDR signal peak from BT.1886. Forcing 100 here
+    // rescales its 203-nit reference white and brightens ordinary SDR video.
+    set_option("target-peak", "auto");
     set_option("tone-mapping", "bt.2390");
     set_option("gamut-mapping-mode", "auto");
     set_option("image-display-duration", "inf");

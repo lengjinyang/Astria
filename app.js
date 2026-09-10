@@ -101,7 +101,7 @@
     viewerZoomMode: 'fit', viewerZoom: 1, viewerPan: { x: 0, y: 0 }, viewerPanGesture: null,
     endBehavior: 'stop', panelOpen: false, viewerResizeObserver: null, viewerResizeRaf: null,
     playbackSpeed: 1, shortcuts: { ...DEFAULT_SHORTCUTS }, shortcutRecording: null, pixelInspector: false, timelineHoverPreview: true, timelineHoverPreviewSize: 196,
-    autoplayOnOpen: true, rememberPlaybackPosition: true, playbackPoster: '', playbackPosterDirty: false, mediaPosterPresented: false, currentWorkspaceReady: true, pendingResumePosition: null, resumeSeekPending: false, resumeTargetPosition: null, resumePositionAppliedAtOpen: false, resumeCorrectionRequested: false, resumePresentationTimer: null, startupMode: 'clean', startupModeApplied: false, controlsVisibility: 'auto', windowSizing: 'fixed', mediaWindowFittedGeneration: null,
+    autoplayOnOpen: true, rememberPlaybackPosition: true, playbackPoster: '', playbackPosterDirty: false, posterCaptureSuppressed: false, mediaPosterPresented: false, currentWorkspaceReady: true, pendingResumePosition: null, resumeSeekPending: false, resumeTargetPosition: null, resumePositionAppliedAtOpen: false, resumeCorrectionRequested: false, resumePresentationTimer: null, startupMode: 'clean', startupModeApplied: false, controlsVisibility: 'auto', windowSizing: 'fixed', mediaWindowFittedGeneration: null,
 
     pixelInspectorLocked: false, pixelSample: null, pixelSampleCanvas: null,
     annotationThumbnails: {},
@@ -310,7 +310,7 @@
     if (ready && topbar.parentElement !== document.body) document.body.appendChild(topbar);
     else if (!ready && topbar.parentElement !== shell) shell.prepend(topbar);
     document.body.classList.toggle('media-ready', ready);
-    $$('.transport button, .transport input, .transport select, .annotation-toolbar button, .annotation-toolbar input, .luma-control button, #lumaContrast, #resetTimelineZoomBtn, #addBookmarkBtn, #cleanModeBtn, #pixelInspectorBtn, #exportAnnotatedFrameBtn').forEach(control => {
+    $$('.transport button, .transport input, .transport select, .annotation-toolbar button, .annotation-toolbar input, .luma-control button, #lumaContrast, #resetTimelineZoomBtn, #addBookmarkBtn, #cleanModeBtn, #pixelInspectorBtn, #exportAnnotatedFrameBtn, #clearThumbnailsBtn, #clearThumbnailsMenuBtn').forEach(control => {
       const alwaysEnabled = ['togglePanelBtn','toggleResourceBrowser','openDefaultAppsBtn','autoplaySwitch','rememberPlaybackPositionSwitch','startupModeSelect','hoverPreviewSwitch','previewSizeRange','previewSizeNumber','previewSizeDownBtn','previewSizeUpBtn','previewSizeResetBtn'].includes(control.id);
       control.disabled = alwaysEnabled ? false : !interactive;
       control.setAttribute('aria-disabled', String(alwaysEnabled ? false : !interactive));
@@ -318,26 +318,19 @@
   }
 
   const COLOR_PRESETS = Object.freeze({
-    original: '原始／标准视频', 'ue5-filmic': 'UE5 Filmic SDR', 'unity-neutral': 'Unity Linear Neutral',
-    'unity-aces': 'Unity Linear ACES', acescg: 'ACEScg → ACES SDR', aces2065: 'ACES2065-1 → ACES SDR'
+    original: '标准显示', bright: '明亮增强'
   });
-  const COLOR_MATRICES = Object.freeze({
-    acescg: [1.70505,-.62179,-.08326,-.13026,1.1408,-.01055,-.024,-.12897,1.15297],
-    aces2065: [2.52169,-1.13413,-.38756,-.27648,1.37272,-.09624,-.01538,-.15298,1.16835]
-  });
-  const srgbEncode = value => value <= .0031308 ? value * 12.92 : 1.055 * Math.pow(Math.max(0,value),1/2.4)-.055;
-  function acesTone(value) { return clamp((value*(2.51*value+.03))/(value*(2.43*value+.59)+.14),0,1); }
-  function neutralTone(value) { const x=Math.max(0,value-.004); return clamp((x*(6.2*x+.5))/(x*(6.2*x+1.7)+.06),0,1); }
   function transformViewRgb(rgb, preset = state.colorPreset) {
-    if (preset === 'original') return rgb.map(value=>clamp(value,0,1));
-    let color = rgb.slice();
-    const matrix = COLOR_MATRICES[preset];
-    if (matrix) color = [matrix[0]*color[0]+matrix[1]*color[1]+matrix[2]*color[2],matrix[3]*color[0]+matrix[4]*color[1]+matrix[5]*color[2],matrix[6]*color[0]+matrix[7]*color[1]+matrix[8]*color[2]];
-    const tone = preset === 'unity-neutral' ? neutralTone : acesTone;
-    color = color.map(value => srgbEncode(tone(value)));
-    if (preset === 'ue5-filmic') color = color.map((value,index)=>clamp(value*(index===2?.985:1.01),0,1));
-    return color;
+    if (preset === 'bright') return rgb.map(value => {
+      const linear = value <= .04045 ? value / 12.92 : Math.pow((value + .055) / 1.055, 2.4);
+      const boosted = linear * 2.03;
+      // Preserve the old midtone lift, with a smooth shoulder instead of clipping highlights.
+      const mapped = boosted <= .7 ? boosted : .7 + .3 * (1 - Math.exp(-(boosted - .7) / .3));
+      return mapped <= .0031308 ? mapped * 12.92 : 1.055 * Math.pow(mapped, 1 / 2.4) - .055;
+    });
+    return rgb.map(value => clamp(value, 0, 1));
   }
+
   function generateColorLut(preset) {
     if (state.colorLuts.has(preset)) return state.colorLuts.get(preset);
     const size=64, data=new Uint8Array(size*size*size*4); let offset=0;
@@ -1418,6 +1411,7 @@
   }
 
   function capturePlaybackPoster() {
+    if (state.posterCaptureSuppressed) return;
     if (playback.readyState < 2 || !playback.videoWidth || !playback.currentFrameCanvas) return;
     let source = playback.currentFrameCanvas;
     if (state.colorPreset !== 'original' && els.colorCanvas.width && els.colorCanvas.height) source = els.colorCanvas;
@@ -1430,6 +1424,7 @@
     try {
       canvas.getContext('2d', { alpha: false }).drawImage(source, 0, 0, canvas.width, canvas.height);
       state.playbackPoster = canvas.toDataURL('image/jpeg', .72);
+      state.playbackPosterVersion = 'sdr-auto-1';
       state.playbackPosterDirty = true;
     } catch { /* poster caching must never interrupt playback */ }
   }
@@ -1497,6 +1492,7 @@
     state.activeMediaProbeId = null; state.mediaProbing = false;
     clearModePresentation();
     state.mediaLoadGeneration += 1;
+    state.posterCaptureSuppressed = false;
     state.mediaAwaitingMetadata = false; state.mediaAwaitingFirstFrame = false; state.mediaReplacing = false; state.mediaPosterPresented = false;
     clearTimeout(state.resumePresentationTimer); state.resumePresentationTimer = null; state.resumeCorrectionRequested = false;
     playback.stop?.();
@@ -1542,6 +1538,7 @@
     clearMediaPresentationAnimation();
     clearModePresentation();
     state.mediaLoadGeneration += 1;
+    state.posterCaptureSuppressed = false;
     state.mediaAwaitingMetadata = true;
     state.mediaAwaitingFirstFrame = true;
     state.mediaReplacing = replacingMedia;
@@ -1561,7 +1558,7 @@
     state.fileMeta = { name: media.name, size: media.size || 0, type: media.type || 'video/*', modified: media.lastModified || 0, path: media.path || null, mediaId: media.mediaId, mediaKind: media.mediaKind || 'video', sourceFps: media.sourceFps || null, sourceFrameOffset: media.sourceFrameOffset || 0, sequence: media.sequence || null };
     const generation = state.mediaLoadGeneration;
     state.currentWorkspaceReady = false;
-    state.bookmarks = []; state.annotations = []; state.annotationThumbnails = {}; state.playbackPoster = ''; state.playbackPosterDirty = false;
+    state.bookmarks = []; state.annotations = []; state.annotationThumbnails = {}; state.playbackPoster = ''; state.playbackPosterVersion = null; state.playbackPosterDirty = false;
     renderBookmarks(); renderAnnotationList(); updateCounts();
     let releaseWorkspaceApply;
     const workspaceApplyGate = new Promise(resolve => { releaseWorkspaceApply = resolve; });
@@ -1581,7 +1578,8 @@
       state.fps = Number(launchState.fps) || Number(media.sourceFps || media.fps) || 24;
       state.pendingResumePosition = state.rememberPlaybackPosition && Number.isFinite(Number(launchState.playbackPosition)) ? Math.max(0, Number(launchState.playbackPosition)) : null;
       state.lastSavedPlaybackPosition = state.pendingResumePosition;
-      state.playbackPoster = state.rememberPlaybackPosition && typeof launchState.playbackPoster === 'string' ? launchState.playbackPoster : '';
+      state.playbackPosterVersion = launchState.playbackPosterVersion;
+      state.playbackPoster = state.rememberPlaybackPosition && launchState.playbackPosterVersion === 'sdr-auto-1' && typeof launchState.playbackPoster === 'string' ? launchState.playbackPoster : '';
       state.playbackPosterDirty = false;
       showPlaybackPoster(state.playbackPoster, generation, launchState);
       openPlaybackAtRememberedPosition(media);
@@ -2491,7 +2489,7 @@
   }
 
   function workspaceData() {
-    return { version: '0.8', mediaDuration: playback.duration || 0, mediaWidth: playback.videoWidth || 0, mediaHeight: playback.videoHeight || 0, mediaKind: state.fileMeta?.mediaKind || 'video', sourceFrameOffset: state.fileMeta?.sourceFrameOffset || 0, sequence: state.fileMeta?.sequence || null, fileMeta: state.fileMeta, fps: state.fps, fpsMode: state.fpsMode, fpsModeExplicit: state.fpsModeExplicit, bookmarks: state.bookmarks, annotations: state.annotations, annotationThumbnails: state.annotationThumbnails, timelineZoom: state.timelineZoom, loopInFrame: state.loopInFrame, loopOutFrame: state.loopOutFrame, colorPreset: state.colorPreset, playbackPosition: state.rememberPlaybackPosition ? rememberedPlaybackPosition() : null, playbackPoster: state.rememberPlaybackPosition ? state.playbackPoster : '', updatedAt: new Date().toISOString() };
+    return { version: '0.8', mediaDuration: playback.duration || 0, mediaWidth: playback.videoWidth || 0, mediaHeight: playback.videoHeight || 0, mediaKind: state.fileMeta?.mediaKind || 'video', sourceFrameOffset: state.fileMeta?.sourceFrameOffset || 0, sequence: state.fileMeta?.sequence || null, fileMeta: state.fileMeta, fps: state.fps, fpsMode: state.fpsMode, fpsModeExplicit: state.fpsModeExplicit, bookmarks: state.bookmarks, annotations: state.annotations, annotationThumbnails: state.annotationThumbnails, timelineZoom: state.timelineZoom, loopInFrame: state.loopInFrame, loopOutFrame: state.loopOutFrame, colorPreset: state.colorPreset, playbackPosition: state.rememberPlaybackPosition ? rememberedPlaybackPosition() : null, playbackPoster: state.rememberPlaybackPosition ? state.playbackPoster : '', playbackPosterVersion: state.playbackPosterVersion, updatedAt: new Date().toISOString() };
   }
 
   function legacyMediaKey(meta) {
@@ -2550,7 +2548,8 @@
       fpsMode: saved.fpsMode || state.fpsMode,
       fpsModeExplicit: saved.fpsModeExplicit ?? state.fpsModeExplicit,
       playbackPosition: position,
-      playbackPoster: state.playbackPoster || saved.playbackPoster || '',
+      playbackPoster: state.posterCaptureSuppressed ? '' : state.playbackPoster || saved.playbackPoster || '',
+      playbackPosterVersion: state.playbackPoster ? state.playbackPosterVersion : saved.playbackPosterVersion,
       updatedAt: new Date().toISOString()
     };
   }
@@ -2653,7 +2652,8 @@
       state.fpsModeExplicit = explicitCustomFps;
       state.fps = state.fpsMode === 'source' ? Number(meta?.sourceFps || meta?.fps) || 24 : Number(saved?.fps) || 24;
       state.pendingResumePosition = state.rememberPlaybackPosition && Number.isFinite(Number(saved?.playbackPosition)) ? Math.max(0, Number(saved.playbackPosition)) : null;
-      state.playbackPoster = state.rememberPlaybackPosition && typeof saved?.playbackPoster === 'string' ? saved.playbackPoster : '';
+      state.playbackPosterVersion = saved?.playbackPosterVersion;
+      state.playbackPoster = state.rememberPlaybackPosition && saved?.playbackPosterVersion === 'sdr-auto-1' && typeof saved?.playbackPoster === 'string' ? saved.playbackPoster : '';
       state.playbackPosterDirty = false;
       state.lastSavedPlaybackPosition = state.pendingResumePosition;
       state.resumeSeekPending = false;
@@ -2963,7 +2963,7 @@
     if (hasLaunchMedia && typeof playback.ensureSession === 'function') void playback.ensureSession().catch(() => {});
     const launchMediaPromise = desktopAPI.consumeLaunchMedia().catch(() => null);
     if (!hasLaunchMedia) {
-      // Keep ordinary start-screen launches lightweight when no file was supplied.
+      // Claim the prepared session only when there is media to open.
       void launchMediaPromise.then(media => {
         if (media && typeof playback.ensureSession === 'function') return playback.ensureSession().catch(() => {});
         return null;
@@ -3026,7 +3026,7 @@
     }
     c.toBlob(async blob => {
       try { await navigator.clipboard.write([new ClipboardItem({'image/png':blob})]); toast(withAnnotations?'已复制带批注画面':'已复制当前帧'); }
-      catch { const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`frame-${currentFrame()}.png`; a.click(); toast('浏览器不允许复制，已下载图片'); }
+      catch { const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`frame-${currentFrame()}.png`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1500); toast('浏览器不允许复制，已下载图片'); }
     });
   }
 
@@ -3557,9 +3557,9 @@
     els.viewerStage.addEventListener('dragleave',()=>els.viewerStage.classList.remove('dragover'));
     els.viewerStage.addEventListener('drop',e=>{e.preventDefault();els.viewerStage.classList.remove('dragover');openVideo(e.dataTransfer.files[0]);});
     playback.addEventListener('loading',()=>{
-      $('.media-loading-indicator span').textContent = '正在解码…';
+      $('.media-loading-indicator span').textContent = state.fileMeta?.mediaKind === 'sequence' ? '正在打开图片序列…' : '正在打开视频…';
       if (state.mediaPosterPresented) { setStatus('正在准备播放'); return; }
-      setStatus(state.fileMeta?.mediaKind === 'sequence' ? '正在读取图片序列并解码首帧…' : '正在读取媒体信息并解码首帧…');
+      setStatus(state.fileMeta?.mediaKind === 'sequence' ? '正在打开图片序列…' : `正在打开 · ${state.fileName}`);
       document.body.classList.add('media-loading');
       els.viewerStage.setAttribute('aria-busy', 'true');
     });
@@ -3792,6 +3792,29 @@
         persistPreferences();
       });
     });
+    const clearThumbnails = async () => {
+      if (!state.currentWorkspaceReady || !state.currentMediaKey) { toast('请等待媒体加载完成'); return; }
+      const key = state.currentMediaKey, generation = state.mediaLoadGeneration;
+      const buttons = $$('#clearThumbnailsBtn, #clearThumbnailsMenuBtn');
+      buttons.forEach(button => { button.disabled = true; });
+      clearTimeout(state.saveTimer);
+      state.saveTimer = null;
+      state.posterCaptureSuppressed = true;
+      state.playbackPoster = '';
+      state.playbackPosterVersion = null;
+      state.playbackPosterDirty = true;
+      clearFrameCache();
+      disposeTimelinePreview();
+      try {
+        await persistMediaSnapshot(key, workspaceData());
+        toast('缩略图已清除，重新打开视频可测试无缓存加载');
+      } catch {
+        toast('缩略图清除失败，请重试');
+      } finally {
+        if (generation === state.mediaLoadGeneration) buttons.forEach(button => { button.disabled = false; });
+      }
+    };
+    $('#clearThumbnailsBtn').addEventListener('click', clearThumbnails);
     $('#resetWorkspaceBtn').addEventListener('click',()=>{
       if (!state.currentWorkspaceReady || !state.currentMediaKey) return;
       const entry = pushWorkspaceUndo('清空工作区');
@@ -3852,7 +3875,15 @@
     mediaInfo.className = 'header-media-info';
     const mediaSummary = document.createElement('summary');
     mediaSummary.textContent = '媒体信息';
-    mediaInfo.append(mediaSummary, $('#mediaInfoTop'));
+    const clearThumbnailsMenu = document.createElement('button');
+    clearThumbnailsMenu.type = 'button';
+    clearThumbnailsMenu.id = 'clearThumbnailsMenuBtn';
+    clearThumbnailsMenu.className = 'top-menu-action';
+    clearThumbnailsMenu.textContent = '清除缩略图';
+    clearThumbnailsMenu.title = $('#clearThumbnailsBtn').title;
+    clearThumbnailsMenu.disabled = true;
+    clearThumbnailsMenu.addEventListener('click', clearThumbnails);
+    mediaInfo.append(mediaSummary, $('#mediaInfoTop'), clearThumbnailsMenu);
     $('.top-more-menu').append(mediaInfo);
     const reviewMenu = $('#reviewMenu');
     const syncActiveReviewTools = () => {

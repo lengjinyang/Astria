@@ -45,7 +45,9 @@ function flush() {
       descriptorAndLaunchState: span('launch.describe-start', 'launch.state-ready'),
       compositorPresentation: span('compositor.start', 'compositor.end'),
       nativeFade: span('window.shown', 'window.full-opacity'),
-      mediaOpenToFirstFrame: span('media.open', 'renderer.first-frame')
+      mediaOpenToFirstFrame: span('media.open', 'renderer.first-frame'),
+      fileLoadedToMetadata: span('media.file-loaded', 'media.metadata-ready'),
+      firstNativeRender: span('texture.render-start', 'texture.render-end')
     }, events: list }, null, 2) + '\n';
   writes = writes.then(async () => {
     await fs.mkdir(directory, { recursive: true });

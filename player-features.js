@@ -695,11 +695,6 @@ window.createPlayerFeatures = ({ playback: p, state, toast, resize, exitClean, s
       .map((n) => String(n).padStart(2, '0'))
       .join(':');
   }
-  p.addEventListener('seeked', () =>
-    notice(
-      `${timeLabel(p.currentTime)} / ${timeLabel(p.duration)} · ${Math.round(p.duration ? (p.currentTime / p.duration) * 100 : 0)}%`,
-    ),
-  );
   p.addEventListener('volumechange', () => notice(p.muted ? '静音' : `音量 ${Math.round(p.volume * 100)}%`));
   return {
     notice,

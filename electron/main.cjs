@@ -6,6 +6,8 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { fileURLToPath, pathToFileURL } = require('node:url');
+const { prunePosters, POSTER } = require('./poster-cache.cjs');
+const { writeAtomic, pruneStoreTemps } = require('./store-files.cjs');
 
 require('./file-associations.cjs')(process.argv);
 if (require('electron-squirrel-startup')) app.quit();
@@ -99,6 +101,12 @@ class DesktopStore {
     this.data = { version: 2, preferences: {}, recentVideos: [] };
     this.pendingWrites = new Map();
     this.workspaceSaves = new Map();
+    this.activePosterKey = null;
+    this.posterMaintenance = null;
+    this.posterMaintenanceTimer = setTimeout(() => this.prunePosterCache(), 30000);
+    this.posterMaintenanceTimer.unref();
+    this.posterMaintenanceInterval = setInterval(() => this.prunePosterCache(), 30 * 60 * 1000);
+    this.posterMaintenanceInterval.unref();
     try {
       const saved = JSON.parse(fs.readFileSync(filePath, 'utf8'));
       if (saved && typeof saved === 'object') {
@@ -125,6 +133,17 @@ class DesktopStore {
   thumbnailDirectory(key) {
     const digest = createHash('sha256').update(String(key)).digest('hex');
     return path.join(this.workspaceDirectory, `${digest}-assets`);
+  }
+
+  prunePosterCache() {
+    if (this.posterMaintenance) return this.posterMaintenance;
+    this.posterMaintenance = Promise.all([pruneStoreTemps(path.dirname(this.filePath)), prunePosters(this.workspaceDirectory, {
+      protectedDirectory: directory =>
+        (this.activePosterKey && directory === this.thumbnailDirectory(this.activePosterKey)) ||
+        [...this.workspaceSaves.keys()].some(target => directory === target.replace(/\.json$/, '-assets'))
+    })]).catch(error => console.warn('Unable to clean local cache:', error.message))
+      .finally(() => { this.posterMaintenance = null; });
+    return this.posterMaintenance;
   }
 
   thumbnailTokenFile(value) {
@@ -168,6 +187,10 @@ class DesktopStore {
     };
     for (const bookmark of copy.bookmarks || []) bookmark.thumbnail = await storeThumbnail(bookmark.thumbnail, `bookmark-${bookmark.id || bookmark.frame}`);
     for (const [frame, value] of Object.entries(copy.annotationThumbnails || {})) copy.annotationThumbnails[frame] = await storeThumbnail(value, `annotation-${frame}`);
+    // Only newly captured images or explicitly compatible references are reusable.
+    // Legacy posters were rendered with the old, overly bright SDR mapping.
+    const currentPoster = copy.playbackPosterVersion === 'sdr-auto-1';
+    if (!currentPoster) copy.playbackPoster = '';
     copy.playbackPoster = await storeThumbnail(copy.playbackPoster, 'playback-poster');
     return { workspace: copy, used };
   }
@@ -191,7 +214,16 @@ class DesktopStore {
     };
     for (const bookmark of copy.bookmarks || []) bookmark.thumbnail = resolve(bookmark.thumbnail);
     for (const [frame, value] of Object.entries(copy.annotationThumbnails || {})) copy.annotationThumbnails[frame] = resolve(value);
-    copy.playbackPoster = resolve(copy.playbackPoster);
+    copy.playbackPoster = copy.playbackPosterVersion === 'sdr-auto-1' ? resolve(copy.playbackPoster) : '';
+    if (typeof copy.playbackPoster === 'string' && copy.playbackPoster.startsWith('file:')) {
+      try {
+        const poster = fileURLToPath(copy.playbackPoster);
+        if (path.dirname(poster) === directory && POSTER.test(path.basename(poster))) {
+          const now = new Date();
+          await fsp.utimes(poster, now, now);
+        }
+      } catch { copy.playbackPoster = ''; }
+    }
     return copy;
   }
 
@@ -244,6 +276,7 @@ class DesktopStore {
 
   async loadWorkspace(key) {
     if (typeof key !== 'string' || !key || key.length > 2048) return null;
+    this.activePosterKey = key;
     try {
       const saved = JSON.parse(await fsp.readFile(this.workspacePath(key), 'utf8'));
       return saved?.key === key && saved.workspace && typeof saved.workspace === 'object' ? this.resolveThumbnails(key, saved.workspace) : null;
@@ -252,6 +285,7 @@ class DesktopStore {
 
   async loadLaunchState(key) {
     if (typeof key !== 'string' || !key || key.length > 2048) return null;
+    this.activePosterKey = key;
     try {
       const saved = JSON.parse(await fsp.readFile(this.launchStatePath(key), 'utf8'));
       return saved?.key === key && saved.state && typeof saved.state === 'object' ? this.resolveThumbnails(key, saved.state) : null;
@@ -280,6 +314,8 @@ class DesktopStore {
             const waiters = entry.waiters.splice(0);
             entry.latest = null;
             let saved = false;
+            // A failed later snapshot must not clean assets using an earlier one.
+            entry.hasPersisted = false;
             try {
               const compact = await this.externalizeThumbnails(key, current);
               const payload = JSON.stringify({ key, workspace: compact.workspace });
@@ -289,6 +325,7 @@ class DesktopStore {
                   const launchState = {
                     playbackPosition: Number.isFinite(Number(compact.workspace.playbackPosition)) ? Math.max(0, Number(compact.workspace.playbackPosition)) : 0,
                     playbackPoster: compact.workspace.playbackPoster || '',
+                    playbackPosterVersion: compact.workspace.playbackPosterVersion,
                     mediaDuration: Number(compact.workspace.mediaDuration) || 0,
                     mediaWidth: Number(compact.workspace.mediaWidth) || 0,
                     mediaHeight: Number(compact.workspace.mediaHeight) || 0,
@@ -298,10 +335,10 @@ class DesktopStore {
                     mediaKind: compact.workspace.mediaKind || 'video',
                     sourceFrameOffset: Number(compact.workspace.sourceFrameOffset) || 0
                   };
-                  await this.scheduleWrite(this.launchStatePath(key), JSON.stringify({ key, state: launchState }));
+                  const launchWritten = await this.scheduleWrite(this.launchStatePath(key), JSON.stringify({ key, state: launchState }));
                   entry.lastUsed = compact.used;
-                  entry.hasPersisted = true;
-                  saved = true;
+                  entry.hasPersisted = launchWritten;
+                  saved = launchWritten;
                 }
               }
             } catch (error) { console.error('Unable to persist media workspace:', error); }
@@ -366,10 +403,7 @@ class DesktopStore {
       entry.running = (async () => {
         while (entry.latest !== null) {
           const current = entry.latest; entry.latest = null;
-          const tempPath = `${target}.${process.pid}.tmp`;
-          await fsp.mkdir(path.dirname(target), { recursive: true });
-          await fsp.writeFile(tempPath, current, 'utf8');
-          await fsp.rename(tempPath, target);
+          await writeAtomic(target, current);
         }
         return true;
       })().catch(error => { console.error('Unable to persist desktop data:', error); return false; }).finally(() => {
@@ -631,6 +665,9 @@ function createWindow() {
   });
   void loadingWindow.loadFile(path.join(__dirname, '..', 'index.html'), { query: windowQuery })
     .catch(error => reportStartupFailure(`无法加载播放器界面：${error.message}`));
+  // Initialize the native player while Chromium loads the UI and the catalog
+  // probes launch media. The renderer's first create consumes this session.
+  mediaService.prepare(loadingWindow.webContents);
   mainWindow.once('ready-to-show', () => {
     startupTrace.mark('window.ready-to-show');
     mainWindowReadyToShow = true;

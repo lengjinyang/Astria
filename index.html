@@ -32,8 +32,8 @@
           </summary>
           <div class="top-tool-panel color-view-panel">
             <header><div><b>色彩查看</b></div><span>SDR</span></header>
-            <label class="top-tool-select"><span>查看预设</span><select id="colorPresetSelect"><option value="original">原始／标准视频</option><option value="ue5-filmic">UE5 Filmic SDR</option><option value="unity-neutral">Unity Linear Neutral</option><option value="unity-aces">Unity Linear ACES</option><option value="acescg">ACEScg → ACES SDR</option><option value="aces2065">ACES2065-1 → ACES SDR</option></select></label>
-            <div class="color-preset-warning" id="colorPresetWarning">线性输入预设包含 Tone Mapping。普通 MP4 若已完成调色，请保持“原始”。</div>
+            <label class="top-tool-select"><span>查看预设</span><select id="colorPresetSelect"><option value="original">标准显示</option><option value="bright">明亮增强</option></select></label>
+            <div class="color-preset-warning" id="colorPresetWarning">明亮增强仅改变查看效果；准确查看颜色请选择“标准显示”。</div>
             <p class="top-tool-note">仅改变观看效果，不写入截图、缩略图或导出。</p>
           </div>
         </details>
@@ -320,6 +320,7 @@
               <div><dt>估算总帧</dt><dd id="propFrames">—</dd></div>
               <div><dt>解码</dt><dd><span class="hardware-badge">GPU 优先</span></dd></div>
             </dl>
+            <button type="button" class="secondary-button" id="clearThumbnailsBtn" disabled title="清除当前视频的启动缩略图；本次打开期间不再生成，重新打开后恢复缓存">清除缩略图</button>
           </div>
           <div class="property-group">
             <h3>工作区</h3>

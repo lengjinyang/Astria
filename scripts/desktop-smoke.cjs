@@ -45,7 +45,7 @@ module.exports = async function smoke(window, catalog, app) {
     p.playbackRate=1.5; p.volume=.4; p.muted=true;
     await p.play(); await wait(()=>!p.paused); p.pause(); await wait(()=>p.paused);
     const frame=await p.captureFrame();
-    if(p.presenter?.gl?.getContextAttributes().desynchronized)throw Error('Video canvas bypasses synchronized composition');
+    if((p.presenter?.gl || p.presenter?.context)?.getContextAttributes().desynchronized)throw Error('Video canvas bypasses synchronized composition');
     const click=id=>document.getElementById(id).click();
     if(document.body.classList.contains('clean-mode'))click('cleanModeBtn');
     for(let iteration=0;iteration<3;iteration++) {
@@ -104,7 +104,7 @@ module.exports = async function smoke(window, catalog, app) {
       document.querySelector('.scope-panel button').click();
       console.log('PLAYBACK_FEATURES_PASS');
     }
-    const color=document.getElementById('colorPresetSelect'); color.value='unity-neutral';color.dispatchEvent(new Event('change',{bubbles:true}));
+    const color=document.getElementById('colorPresetSelect'); color.value='bright';color.dispatchEvent(new Event('change',{bubbles:true}));
     await new Promise(resolve=>setTimeout(resolve,250));
     click('lumaBtn'); click('lumaBtn'); click('addBookmarkBtn');
     await wait(()=>document.querySelector('.bookmark-thumb'));
