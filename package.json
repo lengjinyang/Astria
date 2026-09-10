@@ -14,7 +14,7 @@
     "start": "electron-forge start",
     "smoke": "electron . --smoke-test",
     "check:playback": "node scripts/playback-features-smoke.cjs",
-    "check:startup": "node scripts/media-first-frame-test.cjs && electron scripts/startup-smoke.cjs",
+    "check:startup": "node scripts/native-startup-test.cjs && node scripts/media-first-frame-test.cjs && electron scripts/startup-smoke.cjs",
     "package": "electron-forge package",
     "make": "electron-forge make",
     "make:forge": "electron-forge make --platform=win32",

@@ -360,7 +360,7 @@
   // A tiny, temporally blended copy supplies only the light behind the opaque video.
   const ambient = {
     enabled: true, canvas: $('#ambientCanvas'), target: document.createElement('canvas'),
-    timer: null, lastSample: -Infinity, steps: 0
+    timer: null, sampleTimer: null, lastSample: -Infinity, steps: 0
   };
   ambient.target.width = 64; ambient.target.height = 36;
   const ambientCtx = ambient.canvas.getContext('2d');
@@ -368,7 +368,13 @@
   const topbarAmbientCanvas = $('#topbarAmbientCanvas');
   const topbarAmbientCtx = topbarAmbientCanvas.getContext('2d');
 
+  function cancelAmbientSampling() {
+    clearTimeout(ambient.sampleTimer);
+    ambient.sampleTimer = null;
+  }
+
   function resetAmbient() {
+    cancelAmbientSampling();
     clearTimeout(ambient.timer); ambient.timer = null; ambient.steps = 0;
     ambient.lastSample = -Infinity;
     ambientCtx.clearRect(0, 0, 64, 36);
@@ -381,7 +387,9 @@
   function blendAmbient() {
     ambient.timer = null;
     if (!ambient.enabled || document.hidden || document.body.classList.contains('window-interacting')) return;
-    ambientCtx.globalAlpha = .22;
+    // Normalize the remaining exponential weights so the final step reaches
+    // the target exactly, without leaving a trace of the previous frame.
+    ambientCtx.globalAlpha = ambient.steps <= 1 ? 1 : .22 / (1 - Math.pow(.78, ambient.steps));
     ambientCtx.drawImage(ambient.target, 0, 0);
     ambientCtx.globalAlpha = 1;
     topbarAmbientCtx.clearRect(0, 0, 64, 36);
@@ -406,9 +414,19 @@
   }
 
   function sampleAmbient(source) {
-    if (!ambient.enabled || document.hidden || document.body.classList.contains('window-interacting') || playback.readyState < 2 || !playback.videoWidth) return;
+    if (!ambient.enabled || document.hidden || document.body.classList.contains('native-launch-pending') || document.body.classList.contains('window-interacting') || playback.readyState < 2 || !playback.videoWidth) return;
     const now = performance.now();
-    if (now - ambient.lastSample < 160) return;
+    const remaining = 160 - (now - ambient.lastSample);
+    if (remaining > 0) {
+      if (ambient.sampleTimer === null) ambient.sampleTimer = setTimeout(() => {
+        ambient.sampleTimer = null;
+        // Re-evaluate the current display mode instead of retaining a canvas
+        // from a previous preset (WebGL canvases may also need a fresh draw).
+        scheduleColorRender();
+      }, Math.ceil(remaining));
+      return;
+    }
+    cancelAmbientSampling();
     ambient.lastSample = now;
     source ||= els.cacheCanvas.classList.contains('visible') ? els.cacheCanvas : els.video;
     try {
@@ -440,7 +458,7 @@
     }catch(error){console.warn('Color view unavailable',error);state.colorPreset='original';els.colorCanvas.classList.remove('active');$('#colorPresetSelect').value='original';toast('GPU 不可用，已回到原始显示');}
   }
   function scheduleColorRender(){window.playerFeatures?.refreshScope();if(state.colorPreset==='original'){sampleAmbient();return;}if(state.colorRenderPending)return;state.colorRenderPending=true;requestAnimationFrame(renderColorView);}
-  function setColorPreset(preset,persist=true){state.colorPreset=COLOR_PRESETS[preset]?preset:'original';$('#colorPresetSelect').value=state.colorPreset;$('#colorPresetWarning').classList.toggle('show',state.colorPreset!=='original');els.colorCanvas.classList.toggle('active',state.colorPreset!=='original');if(state.colorPreset==='original')state.colorRenderer&&(state.colorRenderer.preset=null);else scheduleColorRender();if(persist)saveWorkspace();toast(`色彩查看 · ${COLOR_PRESETS[state.colorPreset]}`);}
+  function setColorPreset(preset,persist=true){state.colorPreset=COLOR_PRESETS[preset]?preset:'original';$('#colorPresetSelect').value=state.colorPreset;$('#colorPresetWarning').classList.toggle('show',state.colorPreset!=='original');els.colorCanvas.classList.toggle('active',state.colorPreset!=='original');if(state.colorPreset==='original')state.colorRenderer&&(state.colorRenderer.preset=null);scheduleColorRender();if(persist)saveWorkspace();toast(`色彩查看 · ${COLOR_PRESETS[state.colorPreset]}`);}
 
   function renderCompositionGuides(){const on=state.guidesMaster;els.guides.classList.toggle('show-thirds',on&&state.guideThirds);els.guides.classList.toggle('show-golden',on&&state.guideGolden);els.guides.classList.toggle('show-spiral',on&&state.guideSpiral);$('#spiralGuides').setAttribute('transform',`rotate(${state.guideSpiralRotation} 500 500)`);els.guides.classList.toggle('show-center',on&&state.guideCenter);els.guides.classList.toggle('show-diagonal',on&&state.guideDiagonal);els.guides.classList.toggle('show-triangle',on&&state.guideTriangle);els.guides.classList.toggle('show-symmetry',on&&state.guideSymmetry);els.guides.classList.toggle('show-action',on&&state.guideActionSafe);els.guides.classList.toggle('show-title',on&&state.guideTitleSafe);els.guides.classList.toggle('show-mask',on&&state.guideAspect!=='off');els.guides.style.setProperty('--guide-opacity',state.guideOpacity);els.guides.style.setProperty('--guide-mask',state.guideMaskStrength);const ratios={'16:9':16/9,'1.85':1.85,'2.39':2.39,'4:3':4/3,'1:1':1,'9:16':9/16};const target=ratios[state.guideAspect];if(target&&playback.videoWidth){const source=playback.videoWidth/playback.videoHeight;let x=0,y=0,w=1000,h=1000;if(target>source){h=1000*source/target;y=(1000-h)/2;}else{w=1000*target/source;x=(1000-w)/2;}$('#aspectMaskPath').setAttribute('d',`M0 0H1000V1000H0Z M${x} ${y}H${x+w}V${y+h}H${x}Z`);}}
   function toggleCompositionGuides(){const configured=state.guideThirds||state.guideGolden||state.guideSpiral||state.guideCenter||state.guideDiagonal||state.guideTriangle||state.guideSymmetry||state.guideActionSafe||state.guideTitleSafe||state.guideAspect!=='off';if(!configured){state.guideThirds=true;$('#guideThirds').checked=true;state.guidesMaster=true;}else state.guidesMaster=!state.guidesMaster;renderCompositionGuides();persistPreferences();toast(state.guidesMaster?'构图辅助已恢复':'构图辅助已隐藏');}
@@ -648,7 +666,9 @@
     hideTimelinePreview();
     if (enabled && !playback.duration && !state.mediaPosterPresented) { toast('请先打开视频'); return; }
     if (state.cleanMode === enabled) return;
-    const presentationTicket = holdModePresentation();
+    // The initial media presentation owns layout and already has its first
+    // frame/poster. Only an interactive mode switch needs a retained picture.
+    const presentationTicket = updateWindowInsets ? holdModePresentation() : null;
     state.cleanMode = enabled;
     // Fit a floating window to the picture; clean mode has no reserved chrome.
     const windowFit = updateWindowInsets ? fitVideoWindowToMedia(true) : Promise.resolve();
@@ -677,9 +697,11 @@
     }
     revealCleanControls();
     // Commit the picture geometry with the mode class, before the next paint.
-    resizeCanvas();
-    updatePlaybackUI();
-    void finishModePresentation(presentationTicket, windowFit);
+    if (updateWindowInsets) {
+      resizeCanvas();
+      updatePlaybackUI();
+      void finishModePresentation(presentationTicket, windowFit);
+    }
   }
   function pause(outputMode = null) { playback.pause(); stopReverse(); updateMediaOutputTarget(outputMode); }
   function hasLoopRange() {
@@ -1355,25 +1377,29 @@
     }, 340);
     resetViewerView(false);
     renderTimeline();
-    startFrameCacheLoop();
     renderCompositionGuides();
     if (state.colorPreset !== 'original') scheduleColorRender();
-    const layoutReady = fitMediaPresentation().then(() =>
-      new Promise(resolve => requestAnimationFrame(() => {
-        if (generation === state.mediaLoadGeneration) {
-          // Window fitting changes the viewport after the first layout pass.
-          resetViewerView(false);
-          renderTimeline();
-          renderCompositionGuides();
-          updateUI(true);
-          // Do not reveal a cached poster on top of the ready playback frame.
-          if (!state.initialMediaPresentationSent) clearMediaTransitionFrame();
-        }
-        resolve();
-      })));
+    const initialLayout = state.initialMediaLayout?.generation === generation ? state.initialMediaLayout : null;
+    const finishLayout = () => {
+      if (generation === state.mediaLoadGeneration) {
+        // Window fitting changes the viewport after the first layout pass.
+        resetViewerView(false);
+        renderTimeline();
+        renderCompositionGuides();
+        updateUI(true);
+        // Do not reveal a cached poster on top of the ready playback frame.
+        if (!state.initialMediaPresentationSent) clearMediaTransitionFrame();
+      }
+    };
+    const layoutReady = initialLayout?.settled
+      ? Promise.resolve(finishLayout())
+      : (initialLayout?.ready || fitMediaPresentation()).then(() =>
+        new Promise(resolve => requestAnimationFrame(() => { finishLayout(); resolve(); })));
     updateUI(true);
     const finishPresentation = () => deferNonCriticalWork(() => {
       if (generation !== state.mediaLoadGeneration) return;
+      startFrameCacheLoop();
+      scheduleColorRender();
       captureFrame();
       saveWorkspace();
     });
@@ -1718,6 +1744,20 @@
     }
     playback.playbackRate = state.playbackSpeed;
     applyRememberedPlaybackPosition();
+    if (state.mediaAwaitingFirstFrame && !state.mediaPosterPresented &&
+        document.body.classList.contains('native-launch-pending') &&
+        state.initialMediaLayout?.generation !== state.mediaLoadGeneration) {
+      // Fit the hidden playback shell while the native first frame is rendered.
+      // Controls become interactive only when that frame is actually presented.
+      setMediaReady(true, false);
+      if (!state.startupModeApplied) {
+        state.startupModeApplied = true;
+        if (state.startupMode === 'clean') setCleanMode(true, false);
+      }
+      const layout = { generation: state.mediaLoadGeneration, ready: fitMediaPresentation(), settled: false };
+      state.initialMediaLayout = layout;
+      void layout.ready.then(() => requestAnimationFrame(() => { layout.settled = true; }));
+    }
     if (!state.mediaAwaitingFirstFrame) {
       syncLoadedMediaMetadataUI();
       scheduleLayoutRefresh();
@@ -2942,6 +2982,7 @@
   function setWindowInteraction(active) {
     document.body.classList.toggle('window-interacting', active);
     if (active) {
+      cancelAmbientSampling();
       clearTimeout(ambient.timer);
       ambient.timer = null;
       ambient.steps = 0;
@@ -3546,7 +3587,7 @@
     $('.bottom-dock').addEventListener('pointerleave',()=>scheduleCleanControlsHide());
     $('#ambientSwitch').addEventListener('click',()=>setAmbientEnabled(!ambient.enabled));
     document.addEventListener('visibilitychange',()=>{
-      if(document.hidden){clearTimeout(ambient.timer);ambient.timer=null;stopPlaybackUiLoop();}
+      if(document.hidden){cancelAmbientSampling();clearTimeout(ambient.timer);ambient.timer=null;stopPlaybackUiLoop();}
       else{ambient.lastSample=-Infinity;scheduleColorRender();if(!playback.paused&&!state.isReverse)startPlaybackUiLoop();}
     });
     playback.addEventListener('frame',event=>{if(event.detail?.seeked){ambient.lastSample=-Infinity;scheduleColorRender();}});

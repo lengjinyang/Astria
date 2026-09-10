@@ -15,6 +15,13 @@ render thread takes ownership. Closing a session waits for initialization to set
 before releasing native resources. The default constructor remains synchronous for
 existing build tooling.
 
+Within Windows initialization, an independent Win32 worker creates the D3D11
+device while the initialization worker creates WGL. Interop registration waits
+for both devices. A scoped join also runs on every early WGL failure, so cleanup
+never races D3D creation. If thread creation fails, device creation runs serially.
+`node scripts/native-startup-test.cjs` exercises cancellation during native
+initialization and subsequent successful initialization in a bounded child process.
+
 Loading the addon and its DLL dependencies still happens synchronously. The renderer
 can prepare a saved playback poster while initialization is in progress. File-launch
 windows can reveal a cached poster after the complete playback shell is laid out.
@@ -24,6 +31,12 @@ at zero opacity, allow two renderer animation frames, and then set native opacit
 to one. There is no screenshot readback or timer-driven native fade. Deferred
 workspace work and autoplay are released after the opacity commit. Launch state
 includes duration and source dimensions; older saved states use the poster ratio.
+
+On a file launch without a poster, the hidden playback shell starts fitting as
+soon as metadata arrives, overlapping the first full-size frame render. The
+initial mode is applied without the interactive mode-switch capture/exact-frame
+sequence. Frame-cache population and ambient pixel readback start after reveal;
+the required first picture, color view and final layout still precede reveal.
 
 Startup trace `window.shown` now describes the zero-opacity native show;
 `window.full-opacity` is the user-visible reveal. Compare full-opacity times
@@ -51,6 +64,9 @@ and restoring the first video's position. Optional media selection:
 Results and traces are saved under `.cache/startup-smoke-*`. These measure fresh
 application profiles, not cold OS disk/driver caches. Fixtures require
 `.cache/media/h264.mp4` and `.cache/media/prores.mov`.
+To test a cached launch, set `ASTRIA_STARTUP_PROFILE` to a previously generated
+test profile and `ASTRIA_EXPECT_POSTER=1`. Never point this test at a user profile:
+it opens fixtures and updates their playback workspaces.
 
 ## Rebuild libmpv
 

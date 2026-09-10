@@ -1214,6 +1214,25 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
   }
 
   bool init_gl() {
+    // Independent driver devices: D3D creation does not access WGL/GL state.
+    // Join even on an early WGL failure, before cleanup can release resources.
+    // Win32's fallible thread API also works with this addon's no-exceptions build.
+    struct DeviceInit {
+      MpvPlayer* player;
+      bool ready = false;
+      HANDLE thread = nullptr;
+      static DWORD WINAPI run(void* data) {
+        auto* task = static_cast<DeviceInit*>(data);
+        task->ready = task->player->init_d3d_device();
+        return 0;
+      }
+      void join() {
+        if (thread) { WaitForSingleObject(thread, INFINITE); CloseHandle(thread); thread = nullptr; }
+      }
+      ~DeviceInit() { join(); }
+    } d3d{this};
+    d3d.thread = CreateThread(nullptr, 0, DeviceInit::run, &d3d, 0, nullptr);
+    if (!d3d.thread) d3d.ready = init_d3d_device();
     PIXELFORMATDESCRIPTOR pfd = {};
     pfd.nSize = sizeof(pfd);
     pfd.nVersion = 1;
@@ -1247,6 +1266,13 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
       return false;
     }
 
+    d3d.join();
+    if (!d3d.ready) return false;
+    dx_interop_device_ = wglDXOpenDeviceNV_(d3d_device_);
+    return dx_interop_device_ != nullptr;
+  }
+
+  bool init_d3d_device() {
     D3D_FEATURE_LEVEL levels[] = {
       D3D_FEATURE_LEVEL_11_1,
       D3D_FEATURE_LEVEL_11_0,
@@ -1282,8 +1308,7 @@ class MpvPlayer : public Napi::ObjectWrap<MpvPlayer> {
       if (FAILED(hr)) return false;
     }
 
-    dx_interop_device_ = wglDXOpenDeviceNV_(d3d_device_);
-    return dx_interop_device_ != nullptr;
+    return true;
   }
 
   void destroy_dx_interop_target() {

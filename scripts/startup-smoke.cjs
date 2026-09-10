@@ -8,11 +8,15 @@ const { app, BrowserWindow } = require('electron');
 // window. Benchmark the normal file-launch reveal instead.
 BrowserWindow.prototype.maximize = function () {};
 const media = path.resolve(process.argv[2] || '.cache/media/h264.mp4');
-const profile = path.resolve('.cache', `startup-smoke-${Date.now()}-${process.pid}`);
+const profile = process.env.ASTRIA_STARTUP_PROFILE ? path.resolve(process.env.ASTRIA_STARTUP_PROFILE) :
+  path.resolve('.cache', `startup-smoke-${Date.now()}-${process.pid}`);
 const watchdog = setTimeout(() => { console.error('STARTUP_SMOKE_TIMEOUT'); app.exit(1); }, 25000);
 const smoke = require.resolve('./desktop-smoke.cjs');
 require(smoke);
 require.cache[smoke].exports = async (window, catalog) => {
+  await window.webContents.executeJavaScript(`window.__startupLongTasks = []; new PerformanceObserver(list => {
+    window.__startupLongTasks.push(...list.getEntries().map(e => ({start: e.startTime, duration: e.duration})));
+  }).observe({type: 'longtask', buffered: true});`);
   const result = await window.webContents.executeJavaScript(`(async () => {
     const p = window.__astriaPlayback;
     const wait = (condition, label) => new Promise((resolve, reject) => {
@@ -23,6 +27,11 @@ require.cache[smoke].exports = async (window, catalog) => {
     });
     await wait(() => p.readyState >= 2, 'First frame timeout');
     await window.desktopAPI.whenWindowShown();
+    const stage = document.querySelector('#viewerStage').getBoundingClientRect();
+    const picture = document.querySelector('#mediaSurface').getBoundingClientRect();
+    if (picture.width <= 0 || picture.height <= 0 || picture.width > stage.width + 2 || picture.height > stage.height + 2)
+      throw Error('Initial picture was not fitted before reveal');
+    if (document.querySelector('.mode-presentation-canvas.visible')) throw Error('Startup ran an interactive mode transition');
     await wait(() => !p.paused, 'Autoplay timeout');
     const firstTime = p.currentTime;
     await wait(() => p.currentTime >= firstTime + .5, 'Playback did not advance');
@@ -38,11 +47,12 @@ require.cache[smoke].exports = async (window, catalog) => {
     if (document.body.classList.contains('media-loading')) throw Error('Loading overlay remained');
     const context = p.presenter?.gl || p.presenter?.context;
     if (context?.getContextAttributes().desynchronized) throw Error('Unsynchronized presentation');
-    return { width: canvas.width, height: canvas.height, pixels };
+    return { width: canvas.width, height: canvas.height, pixels, longTasks: window.__startupLongTasks };
   })()`);
   await require('../electron/startup-trace.cjs').flush();
   const trace = JSON.parse(fs.readFileSync(path.join(profile, 'startup-traces/latest.json')));
-  if (trace.events.find(event => event.name === 'launch.state-ready')?.detail?.poster) throw Error('First open used a cached poster');
+  const usedPoster = !!trace.events.find(event => event.name === 'launch.state-ready')?.detail?.poster;
+  if (usedPoster !== (process.env.ASTRIA_EXPECT_POSTER === '1')) throw Error('Unexpected launch poster state');
   const next = await catalog.describe(path.resolve('.cache/media', path.basename(media) === 'prores.mov' ? 'h264.mp4' : 'prores.mov'));
   const reopen = async descriptor => {
     await window.webContents.executeJavaScript(`(() => {
