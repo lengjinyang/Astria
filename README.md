@@ -16,9 +16,20 @@
 ### 开发运行
 
 ```powershell
-npm install
+npm ci
+```
+
+首次从 GitHub 克隆后，需先按 [原生核心构建说明](native/README.md#rebuild-libmpv) 安装工具链并生成播放核心：
+
+```powershell
+python -m pip install meson==1.9.2 ninja==1.13.0
+./scripts/fetch-core-sources.ps1
+./scripts/build-libmpv.ps1
+npm run native:build
 npm start
 ```
+
+Git 不保存 `node_modules/`、`.cache/`、`out/` 和 `native/runtime/` 等依赖、缓存或构建产物。已有本地播放核心时可直接运行 `npm start`。`licenses/sources/` 是随发行包提供的第三方许可证对应源码，需保留；安装包与便携包应上传到 GitHub Releases。
 
 ### 验证与构建
 

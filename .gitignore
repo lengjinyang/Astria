@@ -8,3 +8,25 @@ out/
 native/mpv/build/
 native/mpv/*.exp
 native/mpv/*.lib
+
+# Generated native playback runtime (rebuild using native/README.md)
+/native/runtime/
+
+# Local agent state, environment settings and credentials
+/.agents/
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pfx
+*.p12
+
+# Additional build output and local editor / OS files
+/dist/
+/coverage/
+/.vs/
+/.idea/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini
